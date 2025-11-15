@@ -1049,42 +1049,46 @@ func handleRPSGame(message string, senderIDStr string) {
 		currentRPSGame.Mutex.Unlock()
 		rpsGameMutex.Unlock()
 
-		// 发送回应消息给游戏发起者
-		connections := getAllConnections()
-		foundSender := false
-		for peerID, stream := range connections {
-			// 找到发送游戏消息的用户
-			if peerID == senderIDStr {
-				foundSender = true
-				// 获取接收方公钥
-				recipientPubKey, exists := getUserPublicKey(peerID)
-				if !exists {
-					// 如果没有公钥，使用我们自己的公钥作为示例
-					recipientPubKey = &currentUserPublicKey
-				}
+		// 直接向发送游戏消息的用户发送回应
+		globalVarsMutex.RLock()
+		host := globalHost
+		globalVarsMutex.RUnlock()
 
-				responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
-				encryptedMsg, err := crypto.EncryptAndSignMessage(responseMsg, currentUserPrivateKey, recipientPubKey)
+		if host != nil {
+			// 解析发送者的节点ID
+			senderPeerID, err := peer.Decode(senderIDStr)
+			if err != nil {
+				log.Printf("解析发送者节点ID失败: %v\n", err)
+			} else {
+				// 创建到发送者的流
+				stream, err := host.NewStream(context.Background(), senderPeerID, protocolID)
 				if err != nil {
-					log.Printf("加密回应消息失败: %v\n", err)
-					continue
-				}
+					log.Printf("创建到发送者的流失败: %v\n", err)
+				} else {
+					// 获取接收方公钥
+					recipientPubKey, exists := getUserPublicKey(senderIDStr)
+					if !exists {
+						// 如果没有公钥，使用我们自己的公钥作为示例
+						recipientPubKey = &currentUserPublicKey
+					}
 
-				// 发送回应消息
-				_, err = stream.Write([]byte(encryptedMsg + "\n"))
-				if err != nil {
-					log.Printf("发送回应消息失败: %v\n", err)
-					continue
+					responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
+					encryptedMsg, err := crypto.EncryptAndSignMessage(responseMsg, currentUserPrivateKey, recipientPubKey)
+					if err != nil {
+						log.Printf("加密回应消息失败: %v\n", err)
+						stream.Close()
+					} else {
+						// 发送回应消息
+						_, err = stream.Write([]byte(encryptedMsg + "\n"))
+						if err != nil {
+							log.Printf("发送回应消息失败: %v\n", err)
+						} else {
+							fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
+						}
+						stream.Close()
+					}
 				}
-
-				fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
-				break
 			}
-		}
-
-		// 如果没有找到发送者在连接列表中，可能是发起者自己
-		if !foundSender {
-			fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
 		}
 
 		// 检查是否所有玩家都已选择
@@ -1129,6 +1133,7 @@ func handleRPSResponse(message string, senderIDStr string) {
 		rpsGameMutex.Lock()
 		currentRPSGame.Mutex.Lock()
 		currentRPSGame.Players[senderUsername] = senderChoice
+		fmt.Printf("💾 保存玩家 %s 的选择: %s (当前玩家数: %d)\n", senderUsername, senderChoice, len(currentRPSGame.Players))
 		currentRPSGame.Mutex.Unlock()
 		rpsGameMutex.Unlock()
 
@@ -1143,9 +1148,16 @@ func checkAndShowRPSResults() {
 	currentRPSGame.Mutex.RLock()
 
 	// 检查是否所有玩家都已选择
-	if len(currentRPSGame.Players) >= currentRPSGame.ExpectedPlayers && currentRPSGame.ExpectedPlayers > 0 {
+	playerCount := len(currentRPSGame.Players)
+	expectedPlayers := currentRPSGame.ExpectedPlayers
+	fmt.Printf("🔍 游戏状态检查: 当前玩家数 %d, 期望玩家数 %d\n", playerCount, expectedPlayers)
+
+	if playerCount >= expectedPlayers && expectedPlayers > 0 {
+		fmt.Printf("🎉 所有玩家已选择，显示游戏结果\n")
 		// 显示游戏结果
 		showRPSResults()
+	} else {
+		fmt.Printf("💡 等待更多玩家选择...\n")
 	}
 
 	currentRPSGame.Mutex.RUnlock()
