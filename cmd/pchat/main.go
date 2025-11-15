@@ -526,7 +526,7 @@ func handleCommand(command string, registryClient *RegistryClient, dhtDiscovery 
 				fmt.Printf("✅ 已挂断与 %s 的连接\n", target)
 			}
 		}
-	case "/sendfile", "/file":
+	case "/sendfile", "/file", "/send":
 		if len(parts) < 2 {
 			fmt.Println("❌ 用法: /sendfile <文件路径>")
 			return
@@ -551,7 +551,7 @@ func printHelp() {
 	fmt.Println("  /call <用户名>  - 呼叫并连接用户")
 	fmt.Println("  /hangup        - 挂断所有连接")
 	fmt.Println("  /hangup <用户名> - 挂断指定用户连接")
-	fmt.Println("  /sendfile <文件路径> - 发送文件")
+	fmt.Println("  /sendfile <文件路径> - 发送文件 (别名: /file, /send)")
 	fmt.Println("  /rps           - 发起石头剪刀布游戏")
 	fmt.Println("  /quit 或 /exit  - 退出程序")
 }
@@ -1621,8 +1621,14 @@ func handleFileTransfer(message string) {
 		return
 	}
 
+	// 生成带时间戳的文件名
+	timestamp := time.Now().Format("20060102_150405")
+	fileExt := filepath.Ext(fileMsg.FileName)
+	fileNameWithoutExt := strings.TrimSuffix(fileMsg.FileName, fileExt)
+	timestampedFileName := fmt.Sprintf("%s_%s%s", fileNameWithoutExt, timestamp, fileExt)
+
 	// 生成文件路径
-	filePath := filepath.Join(receivedDir, fileMsg.FileName)
+	filePath := filepath.Join(receivedDir, timestampedFileName)
 
 	// 写入文件
 	if err := ioutil.WriteFile(filePath, fileMsg.Content, 0644); err != nil {
