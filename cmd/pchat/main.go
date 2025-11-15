@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -538,6 +539,113 @@ var globalDHTDiscovery *DHTDiscovery
 var globalUsername string
 var globalVarsMutex sync.RWMutex
 
+// 聊天循环
+func chatLoop(registryClient *RegistryClient, dhtDiscovery *DHTDiscovery) {
+	fmt.Println("💬 聊天已启动，输入消息或命令 (/help 查看帮助)")
+
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		fmt.Print("> ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Printf("读取输入失败: %v\n", err)
+			continue
+		}
+
+		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		}
+
+		// 处理命令
+		if strings.HasPrefix(input, "/") {
+			handleCommand(input, registryClient, dhtDiscovery)
+			continue
+		}
+
+		// 处理普通消息（这里简化处理，实际应该发送给连接的peer）
+		fmt.Printf("📤 消息: %s\n", input)
+	}
+}
+
+// 处理命令
+func handleCommand(command string, registryClient *RegistryClient, dhtDiscovery *DHTDiscovery) {
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		return
+	}
+
+	cmd := strings.ToLower(parts[0])
+
+	switch cmd {
+	case "/help":
+		printHelp()
+	case "/list", "/users":
+		listUsers(registryClient, dhtDiscovery)
+	case "/quit", "/exit":
+		fmt.Println("👋 正在退出...")
+		os.Exit(0)
+	default:
+		fmt.Printf("❌ 未知命令: %s\n", cmd)
+		printHelp()
+	}
+}
+
+// 打印帮助信息
+func printHelp() {
+	fmt.Println("📋 可用命令:")
+	fmt.Println("  /help          - 显示此帮助信息")
+	fmt.Println("  /list 或 /users - 显示在线用户列表")
+	fmt.Println("  /quit 或 /exit  - 退出程序")
+}
+
+// 列出在线用户
+func listUsers(registryClient *RegistryClient, dhtDiscovery *DHTDiscovery) {
+	if registryClient != nil {
+		// 使用注册服务器模式
+		users, err := registryClient.ListClients()
+		if err != nil {
+			log.Printf("获取用户列表失败: %v\n", err)
+			return
+		}
+
+		fmt.Printf("📋 在线用户列表 (%d 人):\n", len(users))
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		for i, user := range users {
+			fmt.Printf("%d. 用户名: %s\n", i+1, user.Username)
+			fmt.Printf("   节点ID: %s\n", user.PeerID)
+			fmt.Printf("   最后活跃: %s\n", user.LastSeen.Format("2006-01-02 15:04:05"))
+			for _, addr := range user.Addresses {
+				fmt.Printf("   地址: %s\n", addr)
+			}
+			fmt.Println()
+		}
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	} else if dhtDiscovery != nil {
+		// 使用DHT发现模式
+		users := dhtDiscovery.ListUsers()
+
+		fmt.Printf("📋 在线用户列表 (%d 人):\n", len(users))
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		for i, user := range users {
+			fmt.Printf("%d. 用户名: %s\n", i+1, user.Username)
+			fmt.Printf("   节点ID: %s\n", user.PeerID)
+			fmt.Printf("   最后活跃: %s\n", time.Unix(user.Timestamp, 0).Format("2006-01-02 15:04:05"))
+			for _, addr := range user.Addresses {
+				fmt.Printf("   地址: %s\n", addr)
+			}
+			fmt.Println()
+		}
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	} else {
+		fmt.Println("⚠️  未连接到注册服务器或DHT网络")
+	}
+}
+
 // main 主函数
 func main() {
 	// 解析命令行参数
@@ -656,6 +764,9 @@ func main() {
 		// 简化实现，不处理连接逻辑
 		fmt.Printf("⚠️  目标peer连接功能未实现\n")
 	}
+
+	// 启动聊天循环
+	go chatLoop(registryClient, dhtDiscovery)
 
 	// 等待中断信号
 	sigCh := make(chan os.Signal, 1)
