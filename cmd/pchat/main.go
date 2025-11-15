@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
@@ -530,6 +531,8 @@ func handleCommand(command string, registryClient *RegistryClient, dhtDiscovery 
 			return
 		}
 		sendFile(parts[1])
+	case "/rps":
+		playRPS()
 	case "/quit", "/exit":
 		fmt.Println("👋 正在退出...")
 		os.Exit(0)
@@ -548,6 +551,7 @@ func printHelp() {
 	fmt.Println("  /hangup        - 挂断所有连接")
 	fmt.Println("  /hangup <用户名> - 挂断指定用户连接")
 	fmt.Println("  /sendfile <文件路径> - 发送文件")
+	fmt.Println("  /rps           - 发起石头剪刀布游戏")
 	fmt.Println("  /quit 或 /exit  - 退出程序")
 }
 
@@ -697,6 +701,79 @@ func sendFile(filePath string) {
 	fmt.Printf("✅ 文件已发送\n")
 }
 
+// 石头剪刀布游戏选项
+const (
+	Rock     = "石头"
+	Paper    = "布"
+	Scissors = "剪刀"
+)
+
+// 石头剪刀布游戏选项映射
+var rpsOptions = []string{Rock, Paper, Scissors}
+
+// 石头剪刀布游戏结果
+const (
+	RPSWin  = "赢"
+	RPSTie  = "平局"
+	RPSLose = "输"
+)
+
+// playRPS 发起石头剪刀布游戏
+func playRPS() {
+	fmt.Println("🎮 发起石头剪刀布游戏...")
+
+	// 获取所有连接的用户
+	connections := getAllConnections()
+	if len(connections) == 0 {
+		fmt.Println("⚠️  没有已连接的用户，无法进行游戏")
+		return
+	}
+
+	// 生成自己的随机选择
+	rand.Seed(time.Now().UnixNano())
+	myChoiceIndex := rand.Intn(len(rpsOptions))
+	myChoice := rpsOptions[myChoiceIndex]
+
+	// 生成密钥对用于签名
+	privKey, pubKey, err := crypto.GenerateKeys()
+	if err != nil {
+		log.Printf("生成密钥对失败: %v\n", err)
+		return
+	}
+
+	// 发送游戏邀请和自己的选择给所有连接的用户
+	gameMsg := fmt.Sprintf("🎮 %s 发起石头剪刀布游戏，我的选择是: %s", globalUsername, myChoice)
+	sentCount := 0
+
+	for peerID, stream := range connections {
+		// 获取接收方公钥
+		recipientPubKey, exists := getUserPublicKey(peerID)
+		if !exists {
+			// 如果没有公钥，使用我们自己的公钥作为示例
+			recipientPubKey = &pubKey
+		}
+
+		// 加密游戏消息
+		encryptedMsg, err := crypto.EncryptAndSignMessage(gameMsg, privKey, recipientPubKey)
+		if err != nil {
+			log.Printf("加密游戏消息失败: %v\n", err)
+			continue
+		}
+
+		// 发送游戏消息
+		_, err = stream.Write([]byte(encryptedMsg + "\n"))
+		if err != nil {
+			log.Printf("发送游戏消息失败: %v\n", err)
+			continue
+		}
+
+		sentCount++
+	}
+
+	fmt.Printf("✅ 已向 %d 个用户发送游戏邀请，我的选择是: %s\n", sentCount, myChoice)
+	fmt.Println("💡 等待其他玩家的选择...")
+}
+
 // networkNotifyee 网络通知处理器，用于在连接建立时自动发现用户信息
 type networkNotifyee struct {
 	host         host.Host
@@ -783,10 +860,28 @@ func handleStream(stream network.Stream) {
 			continue
 		}
 
-		// 检查是否为下线通知
-		if strings.Contains(decryptedMsg, "已下线") {
+		// 检查消息类型
+		switch {
+		case strings.Contains(decryptedMsg, "已下线"):
 			fmt.Printf("\n📢 %s\n", decryptedMsg)
-		} else {
+		case strings.Contains(decryptedMsg, "石头剪刀布游戏"):
+			// 处理石头剪刀布游戏消息
+			fmt.Printf("\n%s\n", decryptedMsg)
+			
+			// 如果是游戏发起者，不需要再回应
+			if strings.Contains(decryptedMsg, fmt.Sprintf("%s 发起石头剪刀布游戏", globalUsername)) {
+				break
+			}
+			
+			// 生成自己的随机选择并回应
+			rand.Seed(time.Now().UnixNano())
+			myChoiceIndex := rand.Intn(len(rpsOptions))
+			myChoice := rpsOptions[myChoiceIndex]
+			
+			// 发送回应消息
+			responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
+			fmt.Printf("%s\n", responseMsg)
+		default:
 			// 显示普通消息
 			senderID := stream.Conn().RemotePeer().ShortString()
 			if verified {
