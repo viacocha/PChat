@@ -276,6 +276,7 @@ var globalHost host.Host
 var globalCtx context.Context
 var globalDHTDiscovery *discovery.DHTDiscovery
 var globalUsername string
+var globalUsernameMap map[string]string // 节点ID到用户名的映射
 var globalVarsMutex sync.RWMutex
 
 // 连接管理
@@ -294,6 +295,7 @@ var currentUserPublicKey rsa.PublicKey
 func init() {
 	activeConnections = make(map[string]network.Stream)
 	userPublicKeys = make(map[string]*rsa.PublicKey)
+	globalUsernameMap = make(map[string]string)
 
 	// 生成当前用户的密钥对
 	var err error
@@ -826,11 +828,35 @@ func playRPS() {
 
 	fmt.Printf("✅ 已向 %d 个用户发送游戏邀请，我的选择是: %s\n", sentCount, myChoice)
 	fmt.Println("💡 等待其他玩家的选择...")
+
+	// 检查是否所有玩家都已选择（发起人也需要等待其他玩家的回应）
+	go func() {
+		time.Sleep(100 * time.Millisecond) // 给其他玩家一些时间回应
+		checkAndShowRPSResults()
+	}()
 }
 
 // handleRPSGame 处理石头剪刀布游戏消息
-func handleRPSGame(message string, senderUsername string) {
+func handleRPSGame(message string, senderIDStr string) {
 	fmt.Printf("\n%s\n", message)
+
+	// 从消息中提取发送者用户名
+	var senderUsername string
+	globalVarsMutex.RLock()
+	if globalUsernameMap != nil {
+		senderUsername = globalUsernameMap[senderIDStr]
+	}
+	globalVarsMutex.RUnlock()
+
+	// 如果没有映射到用户名，使用节点ID的短格式
+	if senderUsername == "" {
+		peerID, err := peer.Decode(senderIDStr)
+		if err == nil {
+			senderUsername = peerID.ShortString()
+		} else {
+			senderUsername = senderIDStr
+		}
+	}
 
 	// 提取发送者的选择
 	var senderChoice string
@@ -856,27 +882,49 @@ func handleRPSGame(message string, senderUsername string) {
 
 	// 如果是游戏发起者，不需要再回应
 	if strings.Contains(message, fmt.Sprintf("%s 发起石头剪刀布游戏", globalUsername)) {
+		// 生成自己的随机选择并回应
+		rand.Seed(time.Now().UnixNano())
+		myChoiceIndex := rand.Intn(len(rpsOptions))
+		myChoice := rpsOptions[myChoiceIndex]
+
+		// 保存自己的选择
+		rpsGameMutex.Lock()
+		currentRPSGame.Mutex.Lock()
+		currentRPSGame.Players[globalUsername] = myChoice
+		currentRPSGame.Mutex.Unlock()
+		rpsGameMutex.Unlock()
+
+		// 发送回应消息
+		connections := getAllConnections()
+		for peerID, stream := range connections {
+			// 获取接收方公钥
+			recipientPubKey, exists := getUserPublicKey(peerID)
+			if !exists {
+				// 如果没有公钥，使用我们自己的公钥作为示例
+				recipientPubKey = &currentUserPublicKey
+			}
+
+			responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
+			encryptedMsg, err := crypto.EncryptAndSignMessage(responseMsg, currentUserPrivateKey, recipientPubKey)
+			if err != nil {
+				log.Printf("加密回应消息失败: %v\n", err)
+				continue
+			}
+
+			// 发送回应消息
+			_, err = stream.Write([]byte(encryptedMsg + "\n"))
+			if err != nil {
+				log.Printf("发送回应消息失败: %v\n", err)
+				continue
+			}
+		}
+
+		fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
+
+		// 检查是否所有玩家都已选择
+		checkAndShowRPSResults()
 		return
 	}
-
-	// 生成自己的随机选择并回应
-	rand.Seed(time.Now().UnixNano())
-	myChoiceIndex := rand.Intn(len(rpsOptions))
-	myChoice := rpsOptions[myChoiceIndex]
-
-	// 保存自己的选择
-	rpsGameMutex.Lock()
-	currentRPSGame.Mutex.Lock()
-	currentRPSGame.Players[globalUsername] = myChoice
-	currentRPSGame.Mutex.Unlock()
-	rpsGameMutex.Unlock()
-
-	// 发送回应消息
-	responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
-	fmt.Printf("%s\n", responseMsg)
-
-	// 检查是否所有玩家都已选择
-	checkAndShowRPSResults()
 }
 
 // checkAndShowRPSResults 检查并显示游戏结果
@@ -915,6 +963,7 @@ func showRPSResults() {
 	// 按用户名排序以便显示一致
 	sort.Strings(players)
 
+	// 显示所有玩家的选择
 	for _, player := range players {
 		choice := currentRPSGame.Players[player]
 		fmt.Printf("👤 %s: %s\n", player, choice)
@@ -1013,13 +1062,7 @@ func handleStream(stream network.Stream) {
 			fmt.Printf("\n📢 %s\n", decryptedMsg)
 		case strings.Contains(decryptedMsg, "石头剪刀布游戏"):
 			// 处理石头剪刀布游戏消息
-			senderUsername := senderID.ShortString()
-			// 尝试从连接信息中获取用户名
-			connectionsMutex.RLock()
-			// 这里简化处理，使用节点ID的短格式作为用户名
-			connectionsMutex.RUnlock()
-
-			handleRPSGame(decryptedMsg, senderUsername)
+			handleRPSGame(decryptedMsg, senderIDStr)
 		default:
 			// 显示普通消息
 			senderShortID := senderID.ShortString()
@@ -1070,8 +1113,16 @@ func exchangePublicKeysIncoming(stream network.Stream, peerID string) error {
 		return fmt.Errorf("解析对方公钥失败: %v", err)
 	}
 
-	// 保存对方的公钥
+	// 保存对方的公钥和用户名映射
 	setUserPublicKey(peerID, &receivedKey.PublicKey)
+
+	// 保存用户名映射
+	globalVarsMutex.Lock()
+	if globalUsernameMap == nil {
+		globalUsernameMap = make(map[string]string)
+	}
+	globalUsernameMap[peerID] = receivedKey.Username
+	globalVarsMutex.Unlock()
 
 	fmt.Printf("\n🔐 用户 %s 已连接并交换公钥\n", receivedKey.Username)
 	fmt.Print("> ")
@@ -1327,8 +1378,16 @@ func exchangePublicKeys(stream network.Stream, peerID string) error {
 		return fmt.Errorf("解析对方公钥失败: %v", err)
 	}
 
-	// 保存对方的公钥
+	// 保存对方的公钥和用户名映射
 	setUserPublicKey(peerID, &receivedKey.PublicKey)
+
+	// 保存用户名映射
+	globalVarsMutex.Lock()
+	if globalUsernameMap == nil {
+		globalUsernameMap = make(map[string]string)
+	}
+	globalUsernameMap[peerID] = receivedKey.Username
+	globalVarsMutex.Unlock()
 
 	fmt.Printf("🔐 已与用户 %s 交换公钥\n", receivedKey.Username)
 	return nil
