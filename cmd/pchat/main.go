@@ -1267,6 +1267,7 @@ func handleStream(stream network.Stream) {
 		switch {
 		case strings.Contains(decryptedMsg, "已下线"):
 			fmt.Printf("\n📢 %s\n", decryptedMsg)
+			fmt.Print("> ")
 		case strings.Contains(decryptedMsg, "石头剪刀布游戏"):
 			// 处理石头剪刀布游戏消息
 			handleRPSGame(decryptedMsg, senderIDStr)
@@ -1287,10 +1288,8 @@ func handleStream(stream network.Stream) {
 				fmt.Printf("\n📨 收到来自 %s 的消息:\n", senderShortID)
 				fmt.Printf("⚠️  警告消息: %s（签名验证失败或检测到异常）\n", decryptedMsg)
 			}
+			fmt.Print("> ")
 		}
-
-		// 重新显示提示符
-		fmt.Print("> ")
 	}
 }
 
@@ -1364,7 +1363,6 @@ func (n *networkNotifyee) Disconnected(net network.Network, conn network.Conn) {
 
 	// 通知用户
 	fmt.Printf("\n⚠️  用户 %s 已下线\n", peerID.ShortString())
-	fmt.Print("> ")
 }
 
 // Listen 当开始监听时调用
