@@ -1302,24 +1302,7 @@ func handleStream(stream network.Stream) {
 
 // exchangePublicKeysIncoming 处理传入连接的公钥交换
 func exchangePublicKeysIncoming(stream network.Stream, peerID string) error {
-	// 首先发送自己的公钥
-	exchangeMsg := PublicKeyExchange{
-		PublicKey: currentUserPublicKey,
-		Username:  globalUsername,
-	}
-
-	msgBytes, err := json.Marshal(exchangeMsg)
-	if err != nil {
-		return fmt.Errorf("序列化公钥失败: %v", err)
-	}
-
-	// 发送公钥消息
-	_, err = stream.Write(append(msgBytes, '\n'))
-	if err != nil {
-		return fmt.Errorf("发送公钥失败: %v", err)
-	}
-
-	// 读取对方的公钥
+	// 读取对方的公钥（被动连接方先读取）
 	reader := bufio.NewReader(stream)
 	keyMsg, err := reader.ReadString('\n')
 	if err != nil {
@@ -1342,6 +1325,23 @@ func exchangePublicKeysIncoming(stream network.Stream, peerID string) error {
 	}
 	globalUsernameMap[peerID] = receivedKey.Username
 	globalVarsMutex.Unlock()
+
+	// 然后发送自己的公钥
+	exchangeMsg := PublicKeyExchange{
+		PublicKey: currentUserPublicKey,
+		Username:  globalUsername,
+	}
+
+	msgBytes, err := json.Marshal(exchangeMsg)
+	if err != nil {
+		return fmt.Errorf("序列化公钥失败: %v", err)
+	}
+
+	// 发送公钥消息
+	_, err = stream.Write(append(msgBytes, '\n'))
+	if err != nil {
+		return fmt.Errorf("发送公钥失败: %v", err)
+	}
 
 	fmt.Printf("\n🔐 用户 %s 已连接并交换公钥\n", receivedKey.Username)
 	fmt.Print("> ")
@@ -1567,7 +1567,7 @@ type PublicKeyExchange struct {
 
 // exchangePublicKeys 交换公钥
 func exchangePublicKeys(stream network.Stream, peerID string) error {
-	// 发送自己的公钥
+	// 首先发送自己的公钥（主动连接方先发送）
 	exchangeMsg := PublicKeyExchange{
 		PublicKey: currentUserPublicKey,
 		Username:  globalUsername,
@@ -1584,7 +1584,7 @@ func exchangePublicKeys(stream network.Stream, peerID string) error {
 		return fmt.Errorf("发送公钥失败: %v", err)
 	}
 
-	// 读取对方的公钥
+	// 然后读取对方的公钥
 	reader := bufio.NewReader(stream)
 	keyMsg, err := reader.ReadString('\n')
 	if err != nil {
