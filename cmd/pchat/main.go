@@ -664,6 +664,13 @@ func callUser(target string, registryClient *RegistryClient, dhtDiscovery *disco
 		return
 	}
 
+	// 交换公钥
+	if err := exchangePublicKeys(stream, peerIDStr); err != nil {
+		log.Printf("公钥交换失败: %v\n", err)
+		stream.Close()
+		return
+	}
+
 	// 添加连接到活动连接列表
 	addConnection(peerIDStr, stream)
 
@@ -770,6 +777,15 @@ func handleStream(stream network.Stream) {
 	// 设置协议ID
 	stream.SetProtocol(protocolID)
 
+	// 首先交换公钥
+	senderID := stream.Conn().RemotePeer()
+	senderIDStr := senderID.String()
+
+	if err := exchangePublicKeysIncoming(stream, senderIDStr); err != nil {
+		log.Printf("公钥交换失败: %v\n", err)
+		return
+	}
+
 	reader := bufio.NewReader(stream)
 	for {
 		// 读取消息
@@ -789,8 +805,7 @@ func handleStream(stream network.Stream) {
 
 		// 解密并验证消息
 		// 使用当前用户的私钥和发送方的公钥进行解密和验证
-		senderID := stream.Conn().RemotePeer()
-		senderPubKey, exists := getUserPublicKey(senderID.String())
+		senderPubKey, exists := getUserPublicKey(senderIDStr)
 		if !exists {
 			// 如果没有发送方的公钥，使用我们自己的公钥作为示例
 			senderPubKey = &currentUserPublicKey
@@ -849,6 +864,46 @@ func handleStream(stream network.Stream) {
 		// 重新显示提示符
 		fmt.Print("> ")
 	}
+}
+
+// exchangePublicKeysIncoming 处理传入连接的公钥交换
+func exchangePublicKeysIncoming(stream network.Stream, peerID string) error {
+	// 首先发送自己的公钥
+	exchangeMsg := PublicKeyExchange{
+		PublicKey: currentUserPublicKey,
+		Username:  globalUsername,
+	}
+
+	msgBytes, err := json.Marshal(exchangeMsg)
+	if err != nil {
+		return fmt.Errorf("序列化公钥失败: %v", err)
+	}
+
+	// 发送公钥消息
+	_, err = stream.Write(append(msgBytes, '\n'))
+	if err != nil {
+		return fmt.Errorf("发送公钥失败: %v", err)
+	}
+
+	// 读取对方的公钥
+	reader := bufio.NewReader(stream)
+	keyMsg, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("读取对方公钥失败: %v", err)
+	}
+
+	keyMsg = strings.TrimSpace(keyMsg)
+	var receivedKey PublicKeyExchange
+	if err := json.Unmarshal([]byte(keyMsg), &receivedKey); err != nil {
+		return fmt.Errorf("解析对方公钥失败: %v", err)
+	}
+
+	// 保存对方的公钥
+	setUserPublicKey(peerID, &receivedKey.PublicKey)
+
+	fmt.Printf("\n🔐 用户 %s 已连接并交换公钥\n", receivedKey.Username)
+	fmt.Print("> ")
+	return nil
 }
 
 // networkNotifyee 网络通知处理器，用于在连接建立时自动发现用户信息
@@ -1060,4 +1115,49 @@ func main() {
 	hangupAllConnections()
 
 	fmt.Println("👋 程序已安全退出")
+}
+
+// 公钥交换消息结构
+type PublicKeyExchange struct {
+	PublicKey rsa.PublicKey `json:"public_key"`
+	Username  string        `json:"username"`
+}
+
+// exchangePublicKeys 交换公钥
+func exchangePublicKeys(stream network.Stream, peerID string) error {
+	// 发送自己的公钥
+	exchangeMsg := PublicKeyExchange{
+		PublicKey: currentUserPublicKey,
+		Username:  globalUsername,
+	}
+
+	msgBytes, err := json.Marshal(exchangeMsg)
+	if err != nil {
+		return fmt.Errorf("序列化公钥失败: %v", err)
+	}
+
+	// 发送公钥消息
+	_, err = stream.Write(append(msgBytes, '\n'))
+	if err != nil {
+		return fmt.Errorf("发送公钥失败: %v", err)
+	}
+
+	// 读取对方的公钥
+	reader := bufio.NewReader(stream)
+	keyMsg, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("读取对方公钥失败: %v", err)
+	}
+
+	keyMsg = strings.TrimSpace(keyMsg)
+	var receivedKey PublicKeyExchange
+	if err := json.Unmarshal([]byte(keyMsg), &receivedKey); err != nil {
+		return fmt.Errorf("解析对方公钥失败: %v", err)
+	}
+
+	// 保存对方的公钥
+	setUserPublicKey(peerID, &receivedKey.PublicKey)
+
+	fmt.Printf("🔐 已与用户 %s 交换公钥\n", receivedKey.Username)
+	return nil
 }
