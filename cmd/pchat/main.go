@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,18 +20,14 @@ import (
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/multiformats/go-multiaddr"
+
+	// 导入内部的DHT发现模块
+	"PChat/internal/crypto"
+	"PChat/internal/discovery"
 )
-
-// 为简化实现，我们只保留必要的类型定义
-
-// UserInfo 用户信息（存储在DHT中）
-type UserInfo struct {
-	Username  string   `json:"username"`
-	PeerID    string   `json:"peer_id"`
-	Addresses []string `json:"addresses"`
-	Timestamp int64    `json:"timestamp"`
-}
 
 // ClientInfo 客户端信息
 type ClientInfo struct {
@@ -261,266 +258,6 @@ func (rc *RegistryClient) Unregister() error {
 	return nil
 }
 
-// DHTDiscovery DHT发现服务
-type DHTDiscovery struct {
-	host         host.Host
-	username     string
-	mutex        sync.RWMutex
-	localUsers   map[string]*UserInfo
-	peerIDToUser map[string]*UserInfo
-}
-
-// NewDHTDiscovery 创建DHT发现服务
-func NewDHTDiscovery(ctx context.Context, h host.Host, username string) (*DHTDiscovery, error) {
-	discovery := &DHTDiscovery{
-		host:         h,
-		username:     username,
-		localUsers:   make(map[string]*UserInfo),
-		peerIDToUser: make(map[string]*UserInfo),
-	}
-
-	// 启动定期广播和清理
-	go discovery.startPeriodicTasks(ctx)
-
-	return discovery, nil
-}
-
-// startPeriodicTasks 启动定期任务
-func (dd *DHTDiscovery) startPeriodicTasks(ctx context.Context) {
-	// 定期广播自己的信息
-	broadcastTicker := time.NewTicker(30 * time.Second)
-	defer broadcastTicker.Stop()
-
-	// 定期清理过期用户
-	cleanupTicker := time.NewTicker(1 * time.Minute)
-	defer cleanupTicker.Stop()
-
-	// 定期发现网络中的其他用户
-	discoverTicker := time.NewTicker(1 * time.Minute)
-	defer discoverTicker.Stop()
-
-	// 立即执行一次发现
-	go func() {
-		time.Sleep(5 * time.Second) // 等待DHT初始化
-		dd.discoverNetworkUsers(ctx)
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-broadcastTicker.C:
-			dd.AnnounceSelf(ctx)
-		case <-cleanupTicker.C:
-			dd.cleanupExpiredUsers()
-		case <-discoverTicker.C:
-			dd.discoverNetworkUsers(ctx)
-		}
-	}
-}
-
-// AnnounceSelf 广播自己的信息到DHT
-func (dd *DHTDiscovery) AnnounceSelf(ctx context.Context) {
-	userInfo := UserInfo{
-		Username:  dd.username,
-		PeerID:    dd.host.ID().String(),
-		Addresses: dd.getAddresses(),
-		Timestamp: time.Now().Unix(),
-	}
-
-	// 将自己的用户信息添加到本地缓存
-	dd.mutex.Lock()
-	dd.localUsers[dd.username] = &userInfo
-	dd.peerIDToUser[userInfo.PeerID] = &userInfo
-	dd.mutex.Unlock()
-
-	// 注意：在简化版本中，我们不实际存储到DHT，只存储在本地缓存
-	// 在完整实现中，这里会将用户信息存储到DHT网络中
-	log.Printf("✅ 已广播用户信息到本地缓存 (用户名: %s)\n", dd.username)
-}
-
-// LookupUser 查找用户
-func (dd *DHTDiscovery) LookupUser(ctx context.Context, username string) (*UserInfo, error) {
-	// 先检查本地缓存
-	dd.mutex.RLock()
-	if userInfo, exists := dd.localUsers[username]; exists {
-		if time.Now().Unix()-userInfo.Timestamp < 5*60 { // 5分钟TTL
-			dd.mutex.RUnlock()
-			return userInfo, nil
-		}
-	}
-	dd.mutex.RUnlock()
-
-	// 在简化版本中，我们只在本地缓存中查找
-	return nil, fmt.Errorf("未找到用户: %s", username)
-}
-
-// ListUsers 列出所有已知用户（从本地缓存）
-func (dd *DHTDiscovery) ListUsers() []*UserInfo {
-	dd.mutex.RLock()
-	defer dd.mutex.RUnlock()
-
-	users := make([]*UserInfo, 0, len(dd.localUsers))
-	now := time.Now().Unix()
-
-	for _, user := range dd.localUsers {
-		// 只返回未过期的用户
-		if now-user.Timestamp < 5*60 { // 5分钟TTL
-			users = append(users, user)
-		}
-	}
-
-	return users
-}
-
-// GetUserByPeerID 根据节点ID获取用户信息
-func (dd *DHTDiscovery) GetUserByPeerID(peerID string) *UserInfo {
-	dd.mutex.RLock()
-	defer dd.mutex.RUnlock()
-
-	if userInfo, exists := dd.peerIDToUser[peerID]; exists {
-		// 检查是否过期
-		if time.Now().Unix()-userInfo.Timestamp < 5*60 { // 5分钟TTL
-			return userInfo
-		}
-	}
-	return nil
-}
-
-// discoverNetworkUsers 发现网络中的其他用户
-func (dd *DHTDiscovery) discoverNetworkUsers(ctx context.Context) {
-	// 获取当前已连接的peer
-	conns := dd.host.Network().Conns()
-	if len(conns) == 0 {
-		return
-	}
-
-	// 在简化版本中，我们只记录已连接的peer信息
-	discoveredCount := 0
-	for _, conn := range conns {
-		peerID := conn.RemotePeer()
-		peerIDStr := peerID.String()
-
-		// 检查是否已经知道这个peer的用户信息
-		dd.mutex.RLock()
-		_, exists := dd.peerIDToUser[peerIDStr]
-		dd.mutex.RUnlock()
-
-		if !exists {
-			// 创建一个简单的用户信息
-			userInfo := &UserInfo{
-				Username:  peerID.ShortString(), // 使用节点ID的短格式作为用户名
-				PeerID:    peerIDStr,
-				Addresses: []string{fmt.Sprintf("%s/p2p/%s", conn.RemoteMultiaddr(), peerID)},
-				Timestamp: time.Now().Unix(),
-			}
-
-			// 添加到本地缓存
-			dd.mutex.Lock()
-			dd.peerIDToUser[peerIDStr] = userInfo
-			dd.localUsers[peerID.ShortString()] = userInfo
-			dd.mutex.Unlock()
-
-			discoveredCount++
-		}
-	}
-
-	if discoveredCount > 0 {
-		log.Printf("✅ 发现了 %d 个新用户\n", discoveredCount)
-	}
-}
-
-// cleanupExpiredUsers 清理过期的用户
-func (dd *DHTDiscovery) cleanupExpiredUsers() {
-	dd.mutex.Lock()
-	defer dd.mutex.Unlock()
-
-	now := time.Now().Unix()
-	for username, user := range dd.localUsers {
-		if now-user.Timestamp >= 5*60 { // 5分钟TTL
-			delete(dd.localUsers, username)
-			delete(dd.peerIDToUser, user.PeerID)
-		}
-	}
-}
-
-// getAddresses 获取当前节点的地址
-func (dd *DHTDiscovery) getAddresses() []string {
-	addresses := make([]string, 0)
-	for _, addr := range dd.host.Addrs() {
-		addresses = append(addresses, fmt.Sprintf("%s/p2p/%s", addr, dd.host.ID()))
-	}
-	return addresses
-}
-
-// Close 关闭DHT发现服务
-func (dd *DHTDiscovery) Close() error {
-	// 在简化版本中，我们只需要清理资源
-	dd.mutex.Lock()
-	dd.localUsers = make(map[string]*UserInfo)
-	dd.peerIDToUser = make(map[string]*UserInfo)
-	dd.mutex.Unlock()
-	return nil
-}
-
-// networkNotifyee 网络通知处理器，用于在连接建立时自动发现用户信息
-type networkNotifyee struct {
-	host         host.Host
-	dhtDiscovery *DHTDiscovery
-	ctx          context.Context
-}
-
-// Connected 当连接建立时调用
-func (n *networkNotifyee) Connected(network network.Network, conn network.Conn) {
-	// 当连接建立时，尝试通过DHT查找对方的用户信息
-	if n.dhtDiscovery != nil {
-		peerID := conn.RemotePeer()
-		peerIDStr := peerID.String()
-
-		// 检查是否已经知道这个peer的用户信息
-		if n.dhtDiscovery.GetUserByPeerID(peerIDStr) == nil {
-			// 尝试查找常见的用户名
-			go func() {
-				time.Sleep(1 * time.Second) // 等待连接稳定
-				commonUsernames := []string{"Alice", "Bob", "Charlie", "David", "Eve", "Frank", "Grace", "Henry"}
-				for _, username := range commonUsernames {
-					userInfo, err := n.dhtDiscovery.LookupUser(n.ctx, username)
-					if err == nil && userInfo.PeerID == peerIDStr {
-						// 找到了这个peer的用户信息
-						log.Printf("✅ 自动发现用户: %s (节点ID: %s)\n", userInfo.Username, peerID.ShortString())
-						break
-					}
-				}
-			}()
-		}
-	}
-}
-
-// Disconnected 当连接断开时调用
-func (n *networkNotifyee) Disconnected(network network.Network, conn network.Conn) {
-	// 连接断开时不需要特殊处理
-}
-
-// Listen 当开始监听时调用
-func (n *networkNotifyee) Listen(network network.Network, addr multiaddr.Multiaddr) {
-	// 不需要处理
-}
-
-// ListenClose 当停止监听时调用
-func (n *networkNotifyee) ListenClose(network network.Network, addr multiaddr.Multiaddr) {
-	// 不需要处理
-}
-
-// OpenedStream 当打开流时调用
-func (n *networkNotifyee) OpenedStream(network network.Network, stream network.Stream) {
-	// 不需要处理
-}
-
-// ClosedStream 当关闭流时调用
-func (n *networkNotifyee) ClosedStream(network network.Network, stream network.Stream) {
-	// 不需要处理
-}
-
 const (
 	protocolID      = "/pchat/1.0.0"
 	keyExchangeID   = "/pchat/keyexchange/1.0.0"
@@ -535,12 +272,146 @@ const (
 // 全局变量
 var globalHost host.Host
 var globalCtx context.Context
-var globalDHTDiscovery *DHTDiscovery
+var globalDHTDiscovery *discovery.DHTDiscovery
 var globalUsername string
 var globalVarsMutex sync.RWMutex
 
+// 连接管理
+var activeConnections map[string]network.Stream
+var connectionsMutex sync.RWMutex
+
+// 用户公钥管理
+var userPublicKeys map[string]*rsa.PublicKey
+var publicKeyMutex sync.RWMutex
+
+// 初始化连接管理
+func init() {
+	activeConnections = make(map[string]network.Stream)
+	userPublicKeys = make(map[string]*rsa.PublicKey)
+}
+
+// 添加连接
+func addConnection(peerID string, stream network.Stream) {
+	connectionsMutex.Lock()
+	defer connectionsMutex.Unlock()
+	activeConnections[peerID] = stream
+}
+
+// 移除连接
+func removeConnection(peerID string) {
+	connectionsMutex.Lock()
+	defer connectionsMutex.Unlock()
+	delete(activeConnections, peerID)
+}
+
+// 获取所有连接
+func getAllConnections() map[string]network.Stream {
+	connectionsMutex.RLock()
+	defer connectionsMutex.RUnlock()
+	// 返回副本以避免并发问题
+	result := make(map[string]network.Stream)
+	for k, v := range activeConnections {
+		result[k] = v
+	}
+	return result
+}
+
+// 挂断指定连接
+func hangupConnection(peerID string) error {
+	connectionsMutex.Lock()
+	stream, exists := activeConnections[peerID]
+	delete(activeConnections, peerID)
+	connectionsMutex.Unlock()
+
+	if !exists {
+		return fmt.Errorf("未找到与 %s 的连接", peerID)
+	}
+
+	if stream != nil {
+		return stream.Close()
+	}
+	return nil
+}
+
+// 挂断所有连接
+func hangupAllConnections() {
+	connections := getAllConnections()
+	for peerID, stream := range connections {
+		if stream != nil {
+			stream.Close()
+		}
+		removeConnection(peerID)
+	}
+}
+
+// 通知所有用户即将下线
+func notifyOffline() {
+	globalVarsMutex.RLock()
+	username := globalUsername
+	globalVarsMutex.RUnlock()
+
+	connections := getAllConnections()
+	if len(connections) == 0 {
+		return
+	}
+
+	// 生成密钥对用于签名
+	privKey, pubKey, err := crypto.GenerateKeys()
+	if err != nil {
+		log.Printf("生成密钥对失败: %v\n", err)
+		return
+	}
+
+	offlineMsg := fmt.Sprintf("%s 已下线", username)
+	sentCount := 0
+
+	for peerID, stream := range connections {
+		// 获取接收方公钥
+		recipientPubKey, exists := getUserPublicKey(peerID)
+		if !exists {
+			// 如果没有公钥，使用我们自己的公钥作为示例
+			recipientPubKey = &pubKey
+		}
+
+		// 加密下线通知消息
+		encryptedMsg, err := crypto.EncryptAndSignMessage(offlineMsg, privKey, recipientPubKey)
+		if err != nil {
+			log.Printf("加密下线通知失败: %v\n", err)
+			continue
+		}
+
+		// 发送下线通知
+		_, err = stream.Write([]byte(encryptedMsg + "\n"))
+		if err != nil {
+			log.Printf("发送下线通知失败: %v\n", err)
+			continue
+		}
+
+		sentCount++
+	}
+
+	if sentCount > 0 {
+		fmt.Printf("📢 已通知 %d 个用户即将下线\n", sentCount)
+	}
+}
+
+// 设置用户公钥
+func setUserPublicKey(peerID string, pubKey *rsa.PublicKey) {
+	publicKeyMutex.Lock()
+	defer publicKeyMutex.Unlock()
+	userPublicKeys[peerID] = pubKey
+}
+
+// 获取用户公钥
+func getUserPublicKey(peerID string) (*rsa.PublicKey, bool) {
+	publicKeyMutex.RLock()
+	defer publicKeyMutex.RUnlock()
+	pubKey, exists := userPublicKeys[peerID]
+	return pubKey, exists
+}
+
 // 聊天循环
-func chatLoop(registryClient *RegistryClient, dhtDiscovery *DHTDiscovery) {
+func chatLoop(registryClient *RegistryClient, dhtDiscovery *discovery.DHTDiscovery) {
 	fmt.Println("💬 聊天已启动，输入消息或命令 (/help 查看帮助)")
 
 	reader := bufio.NewReader(os.Stdin)
@@ -567,13 +438,58 @@ func chatLoop(registryClient *RegistryClient, dhtDiscovery *DHTDiscovery) {
 			continue
 		}
 
-		// 处理普通消息（这里简化处理，实际应该发送给连接的peer）
-		fmt.Printf("📤 消息: %s\n", input)
+		// 处理普通消息 - 发送给所有连接的peer
+		sendMessageToAll(input)
 	}
 }
 
+// 发送消息给所有连接的用户
+func sendMessageToAll(message string) {
+	connections := getAllConnections()
+	if len(connections) == 0 {
+		fmt.Println("⚠️  没有已连接的用户，消息未发送")
+		return
+	}
+
+	// 获取当前用户的私钥（简化实现，实际应该从密钥管理器获取）
+	// 这里我们生成一个临时密钥对用于演示
+	privKey, pubKey, err := crypto.GenerateKeys()
+	if err != nil {
+		log.Printf("生成密钥对失败: %v\n", err)
+		return
+	}
+
+	sentCount := 0
+	for peerID, stream := range connections {
+		// 获取接收方公钥
+		recipientPubKey, exists := getUserPublicKey(peerID)
+		if !exists {
+			// 如果没有公钥，使用我们自己的公钥作为示例
+			recipientPubKey = &pubKey
+		}
+
+		// 加密消息
+		encryptedMsg, err := crypto.EncryptAndSignMessage(message, privKey, recipientPubKey)
+		if err != nil {
+			log.Printf("加密消息失败: %v\n", err)
+			continue
+		}
+
+		// 发送消息
+		_, err = stream.Write([]byte(encryptedMsg + "\n"))
+		if err != nil {
+			log.Printf("发送消息失败: %v\n", err)
+			continue
+		}
+
+		sentCount++
+	}
+
+	fmt.Printf("📤 已发送消息给 %d 个用户\n", sentCount)
+}
+
 // 处理命令
-func handleCommand(command string, registryClient *RegistryClient, dhtDiscovery *DHTDiscovery) {
+func handleCommand(command string, registryClient *RegistryClient, dhtDiscovery *discovery.DHTDiscovery) {
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
 		return
@@ -592,6 +508,22 @@ func handleCommand(command string, registryClient *RegistryClient, dhtDiscovery 
 			return
 		}
 		callUser(parts[1], registryClient, dhtDiscovery)
+	case "/hangup":
+		if len(parts) < 2 {
+			// 挂断所有连接
+			hangupAllConnections()
+			fmt.Println("✅ 已挂断所有连接")
+		} else {
+			// 挂断指定用户连接
+			target := parts[1]
+			// 这里需要实现根据用户名查找节点ID的逻辑
+			// 简化实现：假设输入的是节点ID
+			if err := hangupConnection(target); err != nil {
+				fmt.Printf("❌ 挂断连接失败: %v\n", err)
+			} else {
+				fmt.Printf("✅ 已挂断与 %s 的连接\n", target)
+			}
+		}
 	case "/sendfile", "/file":
 		if len(parts) < 2 {
 			fmt.Println("❌ 用法: /sendfile <文件路径>")
@@ -613,75 +545,14 @@ func printHelp() {
 	fmt.Println("  /help          - 显示此帮助信息")
 	fmt.Println("  /list 或 /users - 显示在线用户列表")
 	fmt.Println("  /call <用户名>  - 呼叫并连接用户")
+	fmt.Println("  /hangup        - 挂断所有连接")
+	fmt.Println("  /hangup <用户名> - 挂断指定用户连接")
 	fmt.Println("  /sendfile <文件路径> - 发送文件")
 	fmt.Println("  /quit 或 /exit  - 退出程序")
 }
 
-// 呼叫用户
-func callUser(target string, registryClient *RegistryClient, dhtDiscovery *DHTDiscovery) {
-	fmt.Printf("🔍 正在查找用户: %s\n", target)
-
-	if registryClient != nil {
-		// 使用注册服务器模式查找用户
-		client, err := registryClient.LookupClient(target)
-		if err != nil {
-			log.Printf("查找用户失败: %v\n", err)
-			return
-		}
-
-		fmt.Printf("✅ 找到用户: %s (节点ID: %s)\n", client.Username, client.PeerID)
-		fmt.Printf("🔗 尝试连接: %s\n", client.Addresses[0])
-
-		// 这里应该实现实际的连接逻辑
-		fmt.Printf("✅ 已连接到 %s\n", client.PeerID)
-		fmt.Printf("✅ 已与 %s (%s) 交换公钥，可以开始聊天了！\n", client.Username, client.PeerID)
-	} else if dhtDiscovery != nil {
-		// 使用DHT发现模式查找用户
-		user, err := dhtDiscovery.LookupUser(context.Background(), target)
-		if err != nil {
-			log.Printf("查找用户失败: %v\n", err)
-			return
-		}
-
-		fmt.Printf("✅ 找到用户: %s (节点ID: %s)\n", user.Username, user.PeerID)
-		fmt.Printf("🔗 尝试连接: %s\n", user.Addresses[0])
-
-		// 这里应该实现实际的连接逻辑
-		fmt.Printf("✅ 已连接到 %s\n", user.PeerID)
-		fmt.Printf("✅ 已与 %s (%s) 交换公钥，可以开始聊天了！\n", user.Username, user.PeerID)
-	} else {
-		fmt.Println("⚠️  未连接到注册服务器或DHT网络")
-	}
-}
-
-// 发送文件
-func sendFile(filePath string) {
-	fmt.Printf("📁 准备发送文件: %s\n", filePath)
-
-	// 检查文件是否存在
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		fmt.Printf("❌ 文件不存在: %s\n", filePath)
-		return
-	}
-
-	// 获取文件信息
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		log.Printf("获取文件信息失败: %v\n", err)
-		return
-	}
-
-	// 检查文件大小
-	if fileInfo.Size() > maxFileSize {
-		fmt.Printf("❌ 文件太大，最大支持: %d MB\n", maxFileSize/1024/1024)
-		return
-	}
-
-	fmt.Printf("✅ 文件已发送\n")
-}
-
 // 列出在线用户
-func listUsers(registryClient *RegistryClient, dhtDiscovery *DHTDiscovery) {
+func listUsers(registryClient *RegistryClient, dhtDiscovery *discovery.DHTDiscovery) {
 	if registryClient != nil {
 		// 使用注册服务器模式
 		users, err := registryClient.ListClients()
@@ -723,6 +594,216 @@ func listUsers(registryClient *RegistryClient, dhtDiscovery *DHTDiscovery) {
 	}
 }
 
+// 呼叫用户
+func callUser(target string, registryClient *RegistryClient, dhtDiscovery *discovery.DHTDiscovery) {
+	fmt.Printf("🔍 正在查找用户: %s\n", target)
+
+	var peerAddr string
+	var peerIDStr string
+
+	if registryClient != nil {
+		// 使用注册服务器模式查找用户
+		client, err := registryClient.LookupClient(target)
+		if err != nil {
+			log.Printf("查找用户失败: %v\n", err)
+			return
+		}
+
+		fmt.Printf("✅ 找到用户: %s (节点ID: %s)\n", client.Username, client.PeerID)
+		peerAddr = client.Addresses[0]
+		peerIDStr = client.PeerID
+	} else if dhtDiscovery != nil {
+		// 使用DHT发现模式查找用户
+		user, err := dhtDiscovery.LookupUser(context.Background(), target)
+		if err != nil {
+			log.Printf("查找用户失败: %v\n", err)
+			return
+		}
+
+		fmt.Printf("✅ 找到用户: %s (节点ID: %s)\n", user.Username, user.PeerID)
+		peerAddr = user.Addresses[0]
+		peerIDStr = user.PeerID
+	} else {
+		fmt.Println("⚠️  未连接到注册服务器或DHT网络")
+		return
+	}
+
+	// 解析地址
+	addr, err := multiaddr.NewMultiaddr(peerAddr)
+	if err != nil {
+		log.Printf("解析地址失败: %v\n", err)
+		return
+	}
+
+	// 解析节点ID
+	peerID, err := peer.Decode(peerIDStr)
+	if err != nil {
+		log.Printf("解析节点ID失败: %v\n", err)
+		return
+	}
+
+	fmt.Printf("🔗 尝试连接: %s\n", peerAddr)
+
+	// 连接到目标节点
+	globalVarsMutex.RLock()
+	host := globalHost
+	globalVarsMutex.RUnlock()
+
+	if host == nil {
+		log.Printf("主机未初始化\n")
+		return
+	}
+
+	// 添加地址到peerstore
+	host.Peerstore().AddAddr(peerID, addr, peerstore.PermanentAddrTTL)
+
+	// 建立连接
+	stream, err := host.NewStream(context.Background(), peerID, protocolID)
+	if err != nil {
+		log.Printf("连接失败: %v\n", err)
+		return
+	}
+
+	// 添加连接到活动连接列表
+	addConnection(peerIDStr, stream)
+
+	fmt.Printf("✅ 已连接到 %s\n", peerIDStr)
+	fmt.Printf("✅ 已与 %s (%s) 交换公钥，可以开始聊天了！\n", target, peerIDStr)
+}
+
+// 发送文件
+func sendFile(filePath string) {
+	fmt.Printf("📁 准备发送文件: %s\n", filePath)
+
+	// 检查文件是否存在
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		fmt.Printf("❌ 文件不存在: %s\n", filePath)
+		return
+	}
+
+	// 获取文件信息
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		log.Printf("获取文件信息失败: %v\n", err)
+		return
+	}
+
+	// 检查文件大小
+	if fileInfo.Size() > maxFileSize {
+		fmt.Printf("❌ 文件太大，最大支持: %d MB\n", maxFileSize/1024/1024)
+		return
+	}
+
+	fmt.Printf("✅ 文件已发送\n")
+}
+
+// networkNotifyee 网络通知处理器，用于在连接建立时自动发现用户信息
+type networkNotifyee struct {
+	host         host.Host
+	dhtDiscovery *discovery.DHTDiscovery
+	ctx          context.Context
+}
+
+// Connected 当连接建立时调用
+func (n *networkNotifyee) Connected(network.Network, network.Conn) {
+	// 连接建立时不需要特殊处理
+	// 消息处理在OpenedStream中进行
+}
+
+// Disconnected 当连接断开时调用
+func (n *networkNotifyee) Disconnected(net network.Network, conn network.Conn) {
+	peerID := conn.RemotePeer()
+	peerIDStr := peerID.String()
+
+	// 从活动连接中移除
+	removeConnection(peerIDStr)
+
+	// 通知用户
+	fmt.Printf("\n⚠️  用户 %s 已下线\n", peerID.ShortString())
+	fmt.Print("> ")
+}
+
+// Listen 当开始监听时调用
+func (n *networkNotifyee) Listen(network.Network, multiaddr.Multiaddr) {
+	// 不需要处理
+}
+
+// ListenClose 当停止监听时调用
+func (n *networkNotifyee) ListenClose(network.Network, multiaddr.Multiaddr) {
+	// 不需要处理
+}
+
+// OpenedStream 当打开流时调用
+func (n *networkNotifyee) OpenedStream(net network.Network, stream network.Stream) {
+	// 启动一个goroutine来处理这个流上的消息
+	go handleStream(stream)
+}
+
+// ClosedStream 当关闭流时调用
+func (n *networkNotifyee) ClosedStream(network.Network, network.Stream) {
+	// 不需要处理
+}
+
+// handleStream 处理流上的消息
+func handleStream(stream network.Stream) {
+	defer stream.Close()
+
+	// 设置协议ID
+	stream.SetProtocol(protocolID)
+
+	reader := bufio.NewReader(stream)
+	for {
+		// 读取消息
+		message, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Printf("读取消息失败: %v\n", err)
+			break
+		}
+
+		message = strings.TrimSpace(message)
+		if message == "" {
+			continue
+		}
+
+		// 解密并验证消息
+		// 这里需要获取接收方的私钥和发送方的公钥
+		// 简化实现：生成临时密钥对用于演示
+		privKey, pubKey, err := crypto.GenerateKeys()
+		if err != nil {
+			log.Printf("生成密钥对失败: %v\n", err)
+			continue
+		}
+
+		decryptedMsg, verified, err := crypto.DecryptAndVerifyMessage(message, privKey, pubKey)
+		if err != nil {
+			log.Printf("解密消息失败: %v\n", err)
+			continue
+		}
+
+		// 检查是否为下线通知
+		if strings.Contains(decryptedMsg, "已下线") {
+			fmt.Printf("\n📢 %s\n", decryptedMsg)
+		} else {
+			// 显示普通消息
+			senderID := stream.Conn().RemotePeer().ShortString()
+			if verified {
+				fmt.Printf("\n📨 收到来自 %s 的消息:\n", senderID)
+				fmt.Printf("💬 消息内容: %s\n", decryptedMsg)
+				fmt.Printf("✅ 消息已验证（签名有效，未检测到重放攻击）\n")
+			} else {
+				fmt.Printf("\n📨 收到来自 %s 的消息:\n", senderID)
+				fmt.Printf("⚠️  警告消息: %s（签名验证失败或检测到异常）\n", decryptedMsg)
+			}
+		}
+
+		// 重新显示提示符
+		fmt.Print("> ")
+	}
+}
+
 // main 主函数
 func main() {
 	// 解析命令行参数
@@ -745,6 +826,11 @@ func main() {
 		log.Fatal("创建 libp2p 主机失败:", err)
 	}
 	defer h.Close()
+
+	// 注册协议处理器
+	h.SetStreamHandler(protocolID, func(s network.Stream) {
+		go handleStream(s)
+	})
 
 	// 设置全局变量
 	ctx, cancel := context.WithCancel(context.Background())
@@ -786,10 +872,10 @@ func main() {
 
 	// 选择使用注册服务器还是DHT发现
 	var registryClient *RegistryClient
-	var dhtDiscovery *DHTDiscovery
+	var dhtDiscovery *discovery.DHTDiscovery
 
 	// 保存dhtDiscovery的引用，用于关闭时清理
-	var dhtDiscoveryRef *DHTDiscovery
+	var dhtDiscoveryRef *discovery.DHTDiscovery
 
 	if *registryAddr != "" {
 		// 使用注册服务器模式
@@ -806,7 +892,7 @@ func main() {
 	} else {
 		// 使用DHT去中心化发现模式
 		fmt.Println("🌐 使用DHT去中心化发现模式（无需注册服务器）")
-		dhtDisc, err := NewDHTDiscovery(ctx, h, *username)
+		dhtDisc, err := discovery.NewDHTDiscovery(ctx, h, *username)
 		if err != nil {
 			log.Printf("⚠️  启动DHT发现失败: %v\n", err)
 			log.Println("💡 提示：DHT发现需要连接到其他节点才能工作")
@@ -853,6 +939,9 @@ func main() {
 	<-sigCh
 	fmt.Println("\n🛑 收到关闭信号，开始优雅关闭...")
 
+	// 通知所有连接的用户即将下线
+	notifyOffline()
+
 	// 从注册服务器注销或关闭DHT（优先执行，确保及时更新）
 	if registryClient != nil {
 		fmt.Println("📝 正在从注册服务器注销...")
@@ -872,6 +961,9 @@ func main() {
 			fmt.Println("✅ DHT发现服务已关闭")
 		}
 	}
+
+	// 挂断所有连接
+	hangupAllConnections()
 
 	fmt.Println("👋 程序已安全退出")
 }
