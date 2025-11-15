@@ -8,11 +8,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -704,14 +706,77 @@ func sendFile(filePath string) {
 		return
 	}
 
-	fmt.Printf("✅ 文件已发送\n")
+	// 获取所有连接的用户
+	connections := getAllConnections()
+	if len(connections) == 0 {
+		fmt.Println("⚠️  没有已连接的用户，无法发送文件")
+		return
+	}
+
+	fmt.Printf("📤 正在向 %d 个用户发送文件...\n", len(connections))
+
+	// 读取文件内容
+	fileContent, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		log.Printf("读取文件失败: %v\n", err)
+		return
+	}
+
+	// 获取文件名
+	fileName := filepath.Base(filePath)
+
+	// 创建文件传输消息
+	fileMsg := struct {
+		FileName string `json:"file_name"`
+		FileSize int64  `json:"file_size"`
+		Content  []byte `json:"content"`
+	}{
+		FileName: fileName,
+		FileSize: fileInfo.Size(),
+		Content:  fileContent,
+	}
+
+	// 序列化文件消息
+	fileData, err := json.Marshal(fileMsg)
+	if err != nil {
+		log.Printf("序列化文件消息失败: %v\n", err)
+		return
+	}
+
+	sentCount := 0
+	for peerID, stream := range connections {
+		// 获取接收方公钥
+		recipientPubKey, exists := getUserPublicKey(peerID)
+		if !exists {
+			// 如果没有公钥，使用我们自己的公钥作为示例
+			recipientPubKey = &currentUserPublicKey
+		}
+
+		// 加密文件消息
+		encryptedMsg, err := crypto.EncryptAndSignMessage(string(fileData), currentUserPrivateKey, recipientPubKey)
+		if err != nil {
+			log.Printf("加密文件消息失败: %v\n", err)
+			continue
+		}
+
+		// 发送文件消息
+		_, err = stream.Write([]byte(encryptedMsg + "\n"))
+		if err != nil {
+			log.Printf("发送文件消息失败: %v\n", err)
+			continue
+		}
+
+		sentCount++
+	}
+
+	fmt.Printf("✅ 文件发送完成，已发送给 %d 个用户\n", sentCount)
 }
 
 // RPSGame 存储游戏状态
 type RPSGame struct {
 	Players         map[string]string // 用户名 -> 选择
-	ExpectedPlayers int              // 期望的玩家数量
-	Initiator       string           // 游戏发起者
+	ExpectedPlayers int               // 期望的玩家数量
+	Initiator       string            // 游戏发起者
 	Mutex           sync.RWMutex
 }
 
@@ -748,7 +813,7 @@ func determineWinner(choice1, choice2 string) string {
 	if choice1 == choice2 {
 		return RPSTie
 	}
-	
+
 	switch choice1 {
 	case Rock:
 		if choice2 == Scissors {
@@ -781,13 +846,13 @@ func determineMultiPlayerWinner(choices map[string]string) []string {
 
 	// 统计每个玩家的胜负情况
 	winCounts := make(map[string]int)
-	
+
 	// 获取所有玩家列表
 	players := make([]string, 0, len(choices))
 	for player := range choices {
 		players = append(players, player)
 	}
-	
+
 	// 两两比较
 	for i, player1 := range players {
 		choice1 := choices[player1]
@@ -795,10 +860,10 @@ func determineMultiPlayerWinner(choices map[string]string) []string {
 			if i >= j {
 				continue
 			}
-			
+
 			choice2 := choices[player2]
 			result := determineWinner(choice1, choice2)
-			
+
 			switch result {
 			case RPSWin:
 				winCounts[player1]++
@@ -807,7 +872,7 @@ func determineMultiPlayerWinner(choices map[string]string) []string {
 			}
 		}
 	}
-	
+
 	// 找出胜场最多的玩家
 	maxWins := -1
 	for _, wins := range winCounts {
@@ -815,7 +880,7 @@ func determineMultiPlayerWinner(choices map[string]string) []string {
 			maxWins = wins
 		}
 	}
-	
+
 	// 收集所有胜场最多的玩家
 	winners := make([]string, 0)
 	for player, wins := range winCounts {
@@ -823,12 +888,12 @@ func determineMultiPlayerWinner(choices map[string]string) []string {
 			winners = append(winners, player)
 		}
 	}
-	
+
 	// 如果没有胜场数（都是平局），则所有玩家都是胜者
 	if len(winners) == 0 {
 		winners = players
 	}
-	
+
 	return winners
 }
 
@@ -908,7 +973,7 @@ func handleRPSGame(message string, senderIDStr string) {
 		senderUsername = globalUsernameMap[senderIDStr]
 	}
 	globalVarsMutex.RUnlock()
-	
+
 	// 如果没有映射到用户名，使用节点ID的短格式
 	if senderUsername == "" {
 		peerID, err := peer.Decode(senderIDStr)
@@ -993,17 +1058,17 @@ func handleRPSGame(message string, senderIDStr string) {
 					log.Printf("发送回应消息失败: %v\n", err)
 					continue
 				}
-				
+
 				fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
 				break
 			}
 		}
-		
+
 		// 如果没有找到发送者在连接列表中，可能是发起者自己
 		if !foundSender {
 			fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
 		}
-		
+
 		// 检查是否所有玩家都已选择
 		checkAndShowRPSResults()
 	}
@@ -1020,7 +1085,7 @@ func handleRPSResponse(message string, senderIDStr string) {
 		senderUsername = globalUsernameMap[senderIDStr]
 	}
 	globalVarsMutex.RUnlock()
-	
+
 	// 如果没有映射到用户名，使用节点ID的短格式
 	if senderUsername == "" {
 		peerID, err := peer.Decode(senderIDStr)
@@ -1058,13 +1123,13 @@ func handleRPSResponse(message string, senderIDStr string) {
 func checkAndShowRPSResults() {
 	rpsGameMutex.RLock()
 	currentRPSGame.Mutex.RLock()
-	
+
 	// 检查是否所有玩家都已选择
 	if len(currentRPSGame.Players) >= currentRPSGame.ExpectedPlayers && currentRPSGame.ExpectedPlayers > 0 {
 		// 显示游戏结果
 		showRPSResults()
 	}
-	
+
 	currentRPSGame.Mutex.RUnlock()
 	rpsGameMutex.RUnlock()
 }
@@ -1073,25 +1138,25 @@ func checkAndShowRPSResults() {
 func showRPSResults() {
 	fmt.Println("\n🎮 石头剪刀布游戏结果:")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	
+
 	// 显示所有玩家的选择
 	rpsGameMutex.RLock()
 	currentRPSGame.Mutex.RLock()
-	
+
 	players := make([]string, 0, len(currentRPSGame.Players))
 	for player := range currentRPSGame.Players {
 		players = append(players, player)
 	}
-	
+
 	// 按用户名排序以便显示一致
 	sort.Strings(players)
-	
+
 	// 显示所有玩家的选择
 	for _, player := range players {
 		choice := currentRPSGame.Players[player]
 		fmt.Printf("👤 %s: %s\n", player, choice)
 	}
-	
+
 	// 计算并显示最终胜者
 	fmt.Println("\n🏆 最终结果:")
 	winners := determineMultiPlayerWinner(currentRPSGame.Players)
@@ -1109,10 +1174,10 @@ func showRPSResults() {
 	} else {
 		fmt.Println("🤔 没有明确的胜者")
 	}
-	
+
 	currentRPSGame.Mutex.RUnlock()
 	rpsGameMutex.RUnlock()
-	
+
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Print("> ")
 }
@@ -1184,6 +1249,9 @@ func handleStream(stream network.Stream) {
 		case strings.Contains(decryptedMsg, "的回应: "):
 			// 处理石头剪刀布游戏回应消息
 			handleRPSResponse(decryptedMsg, senderIDStr)
+		case strings.Contains(decryptedMsg, "file_name"):
+			// 处理文件传输消息
+			handleFileTransfer(decryptedMsg)
 		default:
 			// 显示普通消息
 			senderShortID := senderID.ShortString()
@@ -1512,4 +1580,39 @@ func exchangePublicKeys(stream network.Stream, peerID string) error {
 
 	fmt.Printf("🔐 已与用户 %s 交换公钥\n", receivedKey.Username)
 	return nil
+}
+
+// handleFileTransfer 处理文件传输消息
+func handleFileTransfer(message string) {
+	// 解析文件传输消息
+	var fileMsg struct {
+		FileName string `json:"file_name"`
+		FileSize int64  `json:"file_size"`
+		Content  []byte `json:"content"`
+	}
+
+	if err := json.Unmarshal([]byte(message), &fileMsg); err != nil {
+		log.Printf("解析文件消息失败: %v\n", err)
+		return
+	}
+
+	// 创建接收文件目录
+	receivedDir := "received_files"
+	if err := os.MkdirAll(receivedDir, 0755); err != nil {
+		log.Printf("创建接收目录失败: %v\n", err)
+		return
+	}
+
+	// 生成文件路径
+	filePath := filepath.Join(receivedDir, fileMsg.FileName)
+
+	// 写入文件
+	if err := ioutil.WriteFile(filePath, fileMsg.Content, 0644); err != nil {
+		log.Printf("保存文件失败: %v\n", err)
+		return
+	}
+
+	fmt.Printf("\n📥 收到文件: %s (大小: %d 字节)\n", fileMsg.FileName, fileMsg.FileSize)
+	fmt.Printf("💾 文件已保存到: %s\n", filePath)
+	fmt.Print("> ")
 }
