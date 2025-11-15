@@ -723,8 +723,9 @@ const (
 
 // RPSGame 存储游戏状态
 type RPSGame struct {
-	Players map[string]string // 用户名 -> 选择
-	Mutex   sync.RWMutex
+	Players         map[string]string // 用户名 -> 选择
+	ExpectedPlayers int               // 期望的玩家数量
+	Mutex           sync.RWMutex
 }
 
 // 全局游戏实例
@@ -848,6 +849,7 @@ func playRPS() {
 	rpsGameMutex.Lock()
 	currentRPSGame.Mutex.Lock()
 	currentRPSGame.Players = make(map[string]string)
+	currentRPSGame.ExpectedPlayers = len(connections) + 1 // +1 是自己
 	currentRPSGame.Mutex.Unlock()
 	rpsGameMutex.Unlock()
 
@@ -894,12 +896,6 @@ func playRPS() {
 
 	fmt.Printf("✅ 已向 %d 个用户发送游戏邀请，我的选择是: %s\n", sentCount, myChoice)
 	fmt.Println("💡 等待其他玩家的选择...")
-
-	// 检查是否所有玩家都已选择（发起人也需要等待其他玩家的回应）
-	go func() {
-		time.Sleep(100 * time.Millisecond) // 给其他玩家一些时间回应
-		checkAndShowRPSResults()
-	}()
 }
 
 // handleRPSGame 处理石头剪刀布游戏消息
@@ -938,6 +934,11 @@ func handleRPSGame(message string, senderIDStr string) {
 		// 保存发送者的选择
 		rpsGameMutex.Lock()
 		currentRPSGame.Mutex.Lock()
+		// 设置期望玩家数量（发起者 + 所有连接的用户）
+		if currentRPSGame.ExpectedPlayers == 0 {
+			connections := getAllConnections()
+			currentRPSGame.ExpectedPlayers = len(connections) + 1 // +1 是发起者
+		}
 		currentRPSGame.Players[senderUsername] = senderChoice
 		currentRPSGame.Mutex.Unlock()
 		rpsGameMutex.Unlock()
@@ -956,6 +957,11 @@ func handleRPSGame(message string, senderIDStr string) {
 		// 保存自己的选择
 		rpsGameMutex.Lock()
 		currentRPSGame.Mutex.Lock()
+		// 设置期望玩家数量（发起者 + 所有连接的用户）
+		if currentRPSGame.ExpectedPlayers == 0 {
+			connections := getAllConnections()
+			currentRPSGame.ExpectedPlayers = len(connections) + 1 // +1 是发起者
+		}
 		currentRPSGame.Players[globalUsername] = myChoice
 		currentRPSGame.Mutex.Unlock()
 		rpsGameMutex.Unlock()
@@ -1053,12 +1059,8 @@ func checkAndShowRPSResults() {
 	rpsGameMutex.RLock()
 	currentRPSGame.Mutex.RLock()
 
-	// 获取所有连接的用户
-	connections := getAllConnections()
-	expectedPlayers := len(connections) + 1 // +1 是自己
-
 	// 检查是否所有玩家都已选择
-	if len(currentRPSGame.Players) >= expectedPlayers {
+	if len(currentRPSGame.Players) >= currentRPSGame.ExpectedPlayers && currentRPSGame.ExpectedPlayers > 0 {
 		// 显示游戏结果
 		showRPSResults()
 	}
