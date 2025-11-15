@@ -946,8 +946,8 @@ func handleRPSGame(message string, senderIDStr string) {
 		checkAndShowRPSResults()
 	}
 
-	// 如果是游戏发起者，不需要再回应
-	if strings.Contains(message, fmt.Sprintf("%s 发起石头剪刀布游戏", globalUsername)) {
+	// 如果是游戏发起者的消息，需要回应
+	if strings.Contains(message, "发起石头剪刀布游戏") {
 		// 生成自己的随机选择并回应
 		rand.Seed(time.Now().UnixNano())
 		myChoiceIndex := rand.Intn(len(rpsOptions))
@@ -960,36 +960,91 @@ func handleRPSGame(message string, senderIDStr string) {
 		currentRPSGame.Mutex.Unlock()
 		rpsGameMutex.Unlock()
 
-		// 发送回应消息
+		// 发送回应消息给游戏发起者
 		connections := getAllConnections()
+		foundSender := false
 		for peerID, stream := range connections {
-			// 获取接收方公钥
-			recipientPubKey, exists := getUserPublicKey(peerID)
-			if !exists {
-				// 如果没有公钥，使用我们自己的公钥作为示例
-				recipientPubKey = &currentUserPublicKey
-			}
+			// 找到发送游戏消息的用户
+			if peerID == senderIDStr {
+				foundSender = true
+				// 获取接收方公钥
+				recipientPubKey, exists := getUserPublicKey(peerID)
+				if !exists {
+					// 如果没有公钥，使用我们自己的公钥作为示例
+					recipientPubKey = &currentUserPublicKey
+				}
 
-			responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
-			encryptedMsg, err := crypto.EncryptAndSignMessage(responseMsg, currentUserPrivateKey, recipientPubKey)
-			if err != nil {
-				log.Printf("加密回应消息失败: %v\n", err)
-				continue
-			}
+				responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
+				encryptedMsg, err := crypto.EncryptAndSignMessage(responseMsg, currentUserPrivateKey, recipientPubKey)
+				if err != nil {
+					log.Printf("加密回应消息失败: %v\n", err)
+					continue
+				}
 
-			// 发送回应消息
-			_, err = stream.Write([]byte(encryptedMsg + "\n"))
-			if err != nil {
-				log.Printf("发送回应消息失败: %v\n", err)
-				continue
+				// 发送回应消息
+				_, err = stream.Write([]byte(encryptedMsg + "\n"))
+				if err != nil {
+					log.Printf("发送回应消息失败: %v\n", err)
+					continue
+				}
+
+				fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
+				break
 			}
 		}
 
-		fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
+		// 如果没有找到发送者在连接列表中，可能是发起者自己
+		if !foundSender {
+			fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
+		}
 
 		// 检查是否所有玩家都已选择
 		checkAndShowRPSResults()
-		return
+	}
+}
+
+// handleRPSResponse 处理石头剪刀布游戏回应消息
+func handleRPSResponse(message string, senderIDStr string) {
+	fmt.Printf("\n%s\n", message)
+
+	// 从消息中提取发送者用户名
+	var senderUsername string
+	globalVarsMutex.RLock()
+	if globalUsernameMap != nil {
+		senderUsername = globalUsernameMap[senderIDStr]
+	}
+	globalVarsMutex.RUnlock()
+
+	// 如果没有映射到用户名，使用节点ID的短格式
+	if senderUsername == "" {
+		peerID, err := peer.Decode(senderIDStr)
+		if err == nil {
+			senderUsername = peerID.ShortString()
+		} else {
+			senderUsername = senderIDStr
+		}
+	}
+
+	// 提取发送者的选择
+	var senderChoice string
+	if strings.Contains(message, "的回应: "+Rock) {
+		senderChoice = Rock
+	} else if strings.Contains(message, "的回应: "+Paper) {
+		senderChoice = Paper
+	} else if strings.Contains(message, "的回应: "+Scissors) {
+		senderChoice = Scissors
+	}
+
+	if senderChoice != "" {
+		// 保存发送者的选择
+		rpsGameMutex.Lock()
+		currentRPSGame.Mutex.Lock()
+		currentRPSGame.Players[senderUsername] = senderChoice
+		currentRPSGame.Mutex.Unlock()
+		rpsGameMutex.Unlock()
+
+		// 检查是否所有玩家都已选择
+		checkAndShowRPSResults()
 	}
 }
 
@@ -1124,6 +1179,9 @@ func handleStream(stream network.Stream) {
 		case strings.Contains(decryptedMsg, "石头剪刀布游戏"):
 			// 处理石头剪刀布游戏消息
 			handleRPSGame(decryptedMsg, senderIDStr)
+		case strings.Contains(decryptedMsg, "的回应: "):
+			// 处理石头剪刀布游戏回应消息
+			handleRPSResponse(decryptedMsg, senderIDStr)
 		default:
 			// 显示普通消息
 			senderShortID := senderID.ShortString()
