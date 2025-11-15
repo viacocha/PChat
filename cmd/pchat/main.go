@@ -767,6 +767,72 @@ func determineWinner(choice1, choice2 string) string {
 	return RPSTie
 }
 
+// determineMultiPlayerWinner 判断多人游戏的最终胜者
+func determineMultiPlayerWinner(choices map[string]string) []string {
+	if len(choices) <= 1 {
+		players := make([]string, 0, len(choices))
+		for player := range choices {
+			players = append(players, player)
+		}
+		return players
+	}
+
+	// 统计每个玩家的胜负情况
+	winCounts := make(map[string]int)
+	lossCounts := make(map[string]int)
+
+	// 获取所有玩家列表
+	players := make([]string, 0, len(choices))
+	for player := range choices {
+		players = append(players, player)
+	}
+
+	// 两两比较
+	for i, player1 := range players {
+		choice1 := choices[player1]
+		for j, player2 := range players {
+			if i >= j {
+				continue
+			}
+
+			choice2 := choices[player2]
+			result := determineWinner(choice1, choice2)
+
+			switch result {
+			case RPSWin:
+				winCounts[player1]++
+				lossCounts[player2]++
+			case RPSLose:
+				winCounts[player2]++
+				lossCounts[player1]++
+			}
+		}
+	}
+
+	// 找出胜场最多的玩家
+	maxWins := -1
+	for _, wins := range winCounts {
+		if wins > maxWins {
+			maxWins = wins
+		}
+	}
+
+	// 收集所有胜场最多的玩家
+	winners := make([]string, 0)
+	for player, wins := range winCounts {
+		if wins == maxWins && maxWins >= 0 {
+			winners = append(winners, player)
+		}
+	}
+
+	// 如果没有胜场数（都是平局），则所有玩家都是胜者
+	if len(winners) == 0 {
+		winners = players
+	}
+
+	return winners
+}
+
 // playRPS 发起石头剪刀布游戏
 func playRPS() {
 	fmt.Println("🎮 发起石头剪刀布游戏...")
@@ -970,26 +1036,21 @@ func showRPSResults() {
 	}
 
 	// 计算并显示输赢结果
-	fmt.Println("\n🏆 游戏结果:")
-	for i, player1 := range players {
-		choice1 := currentRPSGame.Players[player1]
-		for j, player2 := range players {
-			if i >= j {
-				continue // 避免重复比较和自己与自己比较
+	fmt.Println("\n🏆 最终结果:")
+	winners := determineMultiPlayerWinner(currentRPSGame.Players)
+	if len(winners) == 1 {
+		fmt.Printf("🎉 恭喜 %s 获得胜利！\n", winners[0])
+	} else if len(winners) > 1 {
+		fmt.Print("🤝 并列第一: ")
+		for i, winner := range winners {
+			if i > 0 {
+				fmt.Print(", ")
 			}
-
-			choice2 := currentRPSGame.Players[player2]
-			result := determineWinner(choice1, choice2)
-
-			switch result {
-			case RPSWin:
-				fmt.Printf("   %s 🎉 击败 %s\n", player1, player2)
-			case RPSLose:
-				fmt.Printf("   %s 🎉 击败 %s\n", player2, player1)
-			case RPSTie:
-				fmt.Printf("   %s 🤝 与 %s 平局\n", player1, player2)
-			}
+			fmt.Printf("%s", winner)
 		}
+		fmt.Println()
+	} else {
+		fmt.Println("🤔 没有明确的胜者")
 	}
 
 	currentRPSGame.Mutex.RUnlock()
