@@ -798,6 +798,16 @@ func handleStream(stream network.Stream) {
 
 		decryptedMsg, verified, err := crypto.DecryptAndVerifyMessage(message, currentUserPrivateKey, *senderPubKey)
 		if err != nil {
+			// 在程序关闭过程中忽略解密错误，避免干扰正常关闭流程
+			globalVarsMutex.RLock()
+			host := globalHost
+			globalVarsMutex.RUnlock()
+
+			// 如果主机已经关闭，忽略解密错误
+			if host == nil {
+				break
+			}
+
 			log.Printf("解密消息失败: %v\n", err)
 			continue
 		}
