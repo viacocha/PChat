@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -711,15 +712,58 @@ const (
 	Scissors = "剪刀"
 )
 
-// 石头剪刀布游戏选项映射
-var rpsOptions = []string{Rock, Paper, Scissors}
-
 // 石头剪刀布游戏结果
 const (
 	RPSWin  = "赢"
 	RPSTie  = "平局"
 	RPSLose = "输"
 )
+
+// RPSGame 存储游戏状态
+type RPSGame struct {
+	Players map[string]string // 用户名 -> 选择
+	Mutex   sync.RWMutex
+}
+
+// 全局游戏实例
+var currentRPSGame *RPSGame
+var rpsGameMutex sync.RWMutex
+
+// 石头剪刀布游戏选项映射
+var rpsOptions = []string{Rock, Paper, Scissors}
+
+// 初始化游戏实例
+func init() {
+	currentRPSGame = &RPSGame{
+		Players: make(map[string]string),
+	}
+}
+
+// determineWinner 判断游戏结果
+func determineWinner(choice1, choice2 string) string {
+	if choice1 == choice2 {
+		return RPSTie
+	}
+
+	switch choice1 {
+	case Rock:
+		if choice2 == Scissors {
+			return RPSWin
+		}
+		return RPSLose
+	case Paper:
+		if choice2 == Rock {
+			return RPSWin
+		}
+		return RPSLose
+	case Scissors:
+		if choice2 == Paper {
+			return RPSWin
+		}
+		return RPSLose
+	}
+	return RPSTie
+}
 
 // playRPS 发起石头剪刀布游戏
 func playRPS() {
@@ -732,10 +776,24 @@ func playRPS() {
 		return
 	}
 
+	// 重置游戏状态
+	rpsGameMutex.Lock()
+	currentRPSGame.Mutex.Lock()
+	currentRPSGame.Players = make(map[string]string)
+	currentRPSGame.Mutex.Unlock()
+	rpsGameMutex.Unlock()
+
 	// 生成自己的随机选择
 	rand.Seed(time.Now().UnixNano())
 	myChoiceIndex := rand.Intn(len(rpsOptions))
 	myChoice := rpsOptions[myChoiceIndex]
+
+	// 保存自己的选择
+	rpsGameMutex.Lock()
+	currentRPSGame.Mutex.Lock()
+	currentRPSGame.Players[globalUsername] = myChoice
+	currentRPSGame.Mutex.Unlock()
+	rpsGameMutex.Unlock()
 
 	// 发送游戏邀请和自己的选择给所有连接的用户
 	gameMsg := fmt.Sprintf("🎮 %s 发起石头剪刀布游戏，我的选择是: %s", globalUsername, myChoice)
@@ -768,6 +826,128 @@ func playRPS() {
 
 	fmt.Printf("✅ 已向 %d 个用户发送游戏邀请，我的选择是: %s\n", sentCount, myChoice)
 	fmt.Println("💡 等待其他玩家的选择...")
+}
+
+// handleRPSGame 处理石头剪刀布游戏消息
+func handleRPSGame(message string, senderUsername string) {
+	fmt.Printf("\n%s\n", message)
+
+	// 提取发送者的选择
+	var senderChoice string
+	if strings.Contains(message, "我的选择是: "+Rock) {
+		senderChoice = Rock
+	} else if strings.Contains(message, "我的选择是: "+Paper) {
+		senderChoice = Paper
+	} else if strings.Contains(message, "我的选择是: "+Scissors) {
+		senderChoice = Scissors
+	}
+
+	if senderChoice != "" {
+		// 保存发送者的选择
+		rpsGameMutex.Lock()
+		currentRPSGame.Mutex.Lock()
+		currentRPSGame.Players[senderUsername] = senderChoice
+		currentRPSGame.Mutex.Unlock()
+		rpsGameMutex.Unlock()
+
+		// 检查是否所有玩家都已选择
+		checkAndShowRPSResults()
+	}
+
+	// 如果是游戏发起者，不需要再回应
+	if strings.Contains(message, fmt.Sprintf("%s 发起石头剪刀布游戏", globalUsername)) {
+		return
+	}
+
+	// 生成自己的随机选择并回应
+	rand.Seed(time.Now().UnixNano())
+	myChoiceIndex := rand.Intn(len(rpsOptions))
+	myChoice := rpsOptions[myChoiceIndex]
+
+	// 保存自己的选择
+	rpsGameMutex.Lock()
+	currentRPSGame.Mutex.Lock()
+	currentRPSGame.Players[globalUsername] = myChoice
+	currentRPSGame.Mutex.Unlock()
+	rpsGameMutex.Unlock()
+
+	// 发送回应消息
+	responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
+	fmt.Printf("%s\n", responseMsg)
+
+	// 检查是否所有玩家都已选择
+	checkAndShowRPSResults()
+}
+
+// checkAndShowRPSResults 检查并显示游戏结果
+func checkAndShowRPSResults() {
+	rpsGameMutex.RLock()
+	currentRPSGame.Mutex.RLock()
+
+	// 获取所有连接的用户
+	connections := getAllConnections()
+	expectedPlayers := len(connections) + 1 // +1 是自己
+
+	// 检查是否所有玩家都已选择
+	if len(currentRPSGame.Players) >= expectedPlayers {
+		// 显示游戏结果
+		showRPSResults()
+	}
+
+	currentRPSGame.Mutex.RUnlock()
+	rpsGameMutex.RUnlock()
+}
+
+// showRPSResults 显示石头剪刀布游戏结果
+func showRPSResults() {
+	fmt.Println("\n🎮 石头剪刀布游戏结果:")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// 显示所有玩家的选择
+	rpsGameMutex.RLock()
+	currentRPSGame.Mutex.RLock()
+
+	players := make([]string, 0, len(currentRPSGame.Players))
+	for player := range currentRPSGame.Players {
+		players = append(players, player)
+	}
+
+	// 按用户名排序以便显示一致
+	sort.Strings(players)
+
+	for _, player := range players {
+		choice := currentRPSGame.Players[player]
+		fmt.Printf("👤 %s: %s\n", player, choice)
+	}
+
+	// 计算并显示输赢结果
+	fmt.Println("\n🏆 游戏结果:")
+	for i, player1 := range players {
+		choice1 := currentRPSGame.Players[player1]
+		for j, player2 := range players {
+			if i >= j {
+				continue // 避免重复比较和自己与自己比较
+			}
+
+			choice2 := currentRPSGame.Players[player2]
+			result := determineWinner(choice1, choice2)
+
+			switch result {
+			case RPSWin:
+				fmt.Printf("   %s 🎉 击败 %s\n", player1, player2)
+			case RPSLose:
+				fmt.Printf("   %s 🎉 击败 %s\n", player2, player1)
+			case RPSTie:
+				fmt.Printf("   %s 🤝 与 %s 平局\n", player1, player2)
+			}
+		}
+	}
+
+	currentRPSGame.Mutex.RUnlock()
+	rpsGameMutex.RUnlock()
+
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Print("> ")
 }
 
 // handleStream 处理流上的消息
@@ -833,21 +1013,13 @@ func handleStream(stream network.Stream) {
 			fmt.Printf("\n📢 %s\n", decryptedMsg)
 		case strings.Contains(decryptedMsg, "石头剪刀布游戏"):
 			// 处理石头剪刀布游戏消息
-			fmt.Printf("\n%s\n", decryptedMsg)
+			senderUsername := senderID.ShortString()
+			// 尝试从连接信息中获取用户名
+			connectionsMutex.RLock()
+			// 这里简化处理，使用节点ID的短格式作为用户名
+			connectionsMutex.RUnlock()
 
-			// 如果是游戏发起者，不需要再回应
-			if strings.Contains(decryptedMsg, fmt.Sprintf("%s 发起石头剪刀布游戏", globalUsername)) {
-				break
-			}
-
-			// 生成自己的随机选择并回应
-			rand.Seed(time.Now().UnixNano())
-			myChoiceIndex := rand.Intn(len(rpsOptions))
-			myChoice := rpsOptions[myChoiceIndex]
-
-			// 发送回应消息
-			responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
-			fmt.Printf("%s\n", responseMsg)
+			handleRPSGame(decryptedMsg, senderUsername)
 		default:
 			// 显示普通消息
 			senderShortID := senderID.ShortString()
