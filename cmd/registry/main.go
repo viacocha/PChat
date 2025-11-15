@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -176,7 +177,7 @@ func (rs *RegistryServer) handleRequest(conn net.Conn) {
 
 // Start 启动注册服务器
 func (rs *RegistryServer) Start(port int) error {
-	listener, err := net.Listen("tcp", ":"+string(rune(port)))
+	listener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
 	if err != nil {
 		return err
 	}
