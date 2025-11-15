@@ -960,6 +960,24 @@ func playRPS() {
 
 	fmt.Printf("✅ 已向 %d 个用户发送游戏邀请，我的选择是: %s\n", sentCount, myChoice)
 	fmt.Println("💡 等待其他玩家的选择...")
+
+	// 启动一个goroutine来定期检查游戏状态
+	go func() {
+		for i := 0; i < 30; i++ { // 最多等待30秒
+			time.Sleep(1 * time.Second)
+			rpsGameMutex.RLock()
+			currentRPSGame.Mutex.RLock()
+			playerCount := len(currentRPSGame.Players)
+			expectedPlayers := currentRPSGame.ExpectedPlayers
+			currentRPSGame.Mutex.RUnlock()
+			rpsGameMutex.RUnlock()
+
+			if playerCount >= expectedPlayers && expectedPlayers > 0 {
+				showRPSResults()
+				break
+			}
+		}
+	}()
 }
 
 // handleRPSGame 处理石头剪刀布游戏消息
