@@ -15,7 +15,7 @@ echo "这是测试文件内容" > /tmp/test_file.txt
 
 # 启动第一个客户端（Alice）
 echo "📱 启动第一个客户端 (Alice, 端口 9001)..."
-./bin/pchat -port 9001 -username Alice > /tmp/alice.log 2>&1 &
+./pchat -port 9001 -username Alice > /tmp/alice.log 2>&1 &
 ALICE_PID=$!
 sleep 3
 
@@ -33,7 +33,7 @@ echo ""
 # 启动第二个客户端（Bob），连接到Alice
 echo "📱 启动第二个客户端 (Bob, 端口 9002)..."
 ALICE_ADDR="/ip4/127.0.0.1/tcp/9001/p2p/$ALICE_NODE_ID"
-./bin/pchat -port 9002 -username Bob -peer "$ALICE_ADDR" > /tmp/bob.log 2>&1 &
+./pchat -port 9002 -username Bob -peer "$ALICE_ADDR" > /tmp/bob.log 2>&1 &
 BOB_PID=$!
 sleep 3
 
@@ -46,17 +46,17 @@ sleep 5
 
 # 测试1: 发送消息
 echo "📝 测试1: 发送消息..."
-echo "Hello from Bob" | timeout 2 ./bin/pchat -port 9003 -username TestUser -peer "$ALICE_ADDR" 2>/dev/null || true
+echo "Hello from Bob" | timeout 2 ./pchat -port 9003 -username TestUser -peer "$ALICE_ADDR" 2>/dev/null || true
 sleep 2
 
 # 测试2: 查看在线用户列表
 echo "📋 测试2: 查看在线用户列表..."
-echo "/list" | timeout 2 ./bin/pchat -port 9004 -username TestUser2 -peer "$ALICE_ADDR" 2>/dev/null || true
+echo "/list" | timeout 2 ./pchat -port 9004 -username TestUser2 -peer "$ALICE_ADDR" 2>/dev/null || true
 sleep 2
 
 # 测试3: 呼叫用户
 echo "📞 测试3: 呼叫用户..."
-echo "call Alice" | timeout 2 ./bin/pchat -port 9005 -username TestUser3 -peer "$ALICE_ADDR" 2>/dev/null || true
+echo "call Alice" | timeout 2 ./pchat -port 9005 -username TestUser3 -peer "$ALICE_ADDR" 2>/dev/null || true
 sleep 2
 
 # 显示日志
@@ -80,6 +80,6 @@ echo ""
 echo "✅ 测试完成！"
 echo ""
 echo "💡 提示：要手动测试，请运行："
-echo "   终端1: ./bin/pchat -port 9001 -username Alice"
-echo "   终端2: ./bin/pchat -port 9002 -username Bob -peer /ip4/127.0.0.1/tcp/9001/p2p/<Alice的节点ID>"
+echo "   终端1: ./pchat -port 9001 -username Alice"
+echo "   终端2: ./pchat -port 9002 -username Bob -peer /ip4/127.0.0.1/tcp/9001/p2p/<Alice的节点ID>"
 

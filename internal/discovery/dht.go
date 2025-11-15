@@ -1,4 +1,4 @@
-package main
+package discovery
 
 import (
 	"context"
@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/libp2p/go-libp2p/core/host"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/multiformats/go-base32"
 )
 
@@ -28,12 +28,12 @@ func (v *UserInfoValidator) Validate(key string, value []byte) error {
 	// 键可能是 "/pchat/users/..." 或 "users/..." 或 "/users/..." 或包含 "users" 的任何格式
 	validKey := false
 	keyLower := strings.ToLower(key)
-	
+
 	// 检查键是否包含 "users" 关键字（更宽松的验证）
 	if strings.Contains(keyLower, "users") {
 		validKey = true
 	}
-	
+
 	if !validKey {
 		// 记录实际接收到的键格式以便调试
 		log.Printf("⚠️  验证器接收到意外的键格式: %s\n", key)
@@ -92,10 +92,10 @@ type UserInfo struct {
 
 // DHTDiscovery DHT发现服务
 type DHTDiscovery struct {
-	host       host.Host
-	dht        *dht.IpfsDHT
-	username   string
-	mutex      sync.RWMutex
+	host     host.Host
+	dht      *dht.IpfsDHT
+	username string
+	mutex    sync.RWMutex
 	// 本地缓存的用户列表（按用户名索引）
 	localUsers map[string]*UserInfo
 	// 按节点ID索引的用户信息（用于快速查找）
@@ -109,7 +109,7 @@ func NewDHTDiscovery(ctx context.Context, h host.Host, username string) (*DHTDis
 
 	// 创建DHT实例，使用自定义协议前缀和命名空间验证器
 	// 尝试不同的配置方法：使用 "pchat" 作为命名空间
-	kademliaDHT, err := dht.New(ctx, h, 
+	kademliaDHT, err := dht.New(ctx, h,
 		dht.Mode(dht.ModeServer),
 		dht.ProtocolPrefix("/pchat"),
 		dht.NamespacedValidator("pchat", validator), // 使用 "pchat" 作为命名空间
@@ -196,7 +196,7 @@ func (dd *DHTDiscovery) AnnounceSelf(ctx context.Context) {
 	// 存储到DHT
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	
+
 	if err := dd.dht.PutValue(ctx, key, value); err != nil {
 		// DHT存储失败可能是正常的（当网络节点少时）
 		// 检查是否是"找不到节点"的错误（这是正常的，当DHT网络节点少时）
@@ -258,7 +258,7 @@ func (dd *DHTDiscovery) ListUsers() []*UserInfo {
 
 	users := make([]*UserInfo, 0, len(dd.localUsers))
 	now := time.Now().Unix()
-	
+
 	for _, user := range dd.localUsers {
 		// 只返回未过期的用户
 		if now-user.Timestamp < int64(userInfoTTL.Seconds()) {
@@ -269,11 +269,30 @@ func (dd *DHTDiscovery) ListUsers() []*UserInfo {
 	return users
 }
 
+// RecordUserFromConnection 在直接连接后记录用户信息（用于DHT写入失败时的降级处理）
+func (dd *DHTDiscovery) RecordUserFromConnection(username, peerID string, addresses []string) {
+	if dd == nil || username == "" || peerID == "" {
+		return
+	}
+
+	user := &UserInfo{
+		Username:  username,
+		PeerID:    peerID,
+		Addresses: addresses,
+		Timestamp: time.Now().Unix(),
+	}
+
+	dd.mutex.Lock()
+	defer dd.mutex.Unlock()
+	dd.localUsers[username] = user
+	dd.peerIDToUser[peerID] = user
+}
+
 // DiscoverUsers 发现网络中的用户（通过DHT查询）
 func (dd *DHTDiscovery) DiscoverUsers(ctx context.Context) error {
 	// 查找一些常见的用户名前缀（简化实现）
 	// 在实际应用中，可以使用更复杂的发现机制
-	
+
 	// 这里我们通过查找自己的用户名来触发DHT网络遍历
 	// 实际应用中可能需要更复杂的发现协议
 	_, err := dd.LookupUser(ctx, dd.username)
@@ -287,7 +306,7 @@ func (dd *DHTDiscovery) discoverNetworkUsers(ctx context.Context) {
 	if len(conns) == 0 {
 		return
 	}
-	
+
 	// 对于每个已连接的peer，尝试通过DHT查找其用户信息
 	// 方法：尝试通过DHT查找所有可能的用户名
 	// 由于DHT的限制，我们无法直接枚举所有用户
@@ -295,27 +314,27 @@ func (dd *DHTDiscovery) discoverNetworkUsers(ctx context.Context) {
 	// 1. 尝试查找常见的用户名（如 "Alice", "Bob" 等）
 	// 2. 通过DHT路由表中的peer来发现用户
 	// 3. 实现一个用户发现协议（当peer连接时交换用户名）
-	
+
 	discoveredCount := 0
 	for _, conn := range conns {
 		peerID := conn.RemotePeer()
 		peerIDStr := peerID.String()
-		
+
 		// 检查是否已经知道这个peer的用户信息
 		dd.mutex.RLock()
 		_, exists := dd.peerIDToUser[peerIDStr]
 		dd.mutex.RUnlock()
-		
+
 		if exists {
 			continue // 已经知道这个peer的用户信息
 		}
-		
+
 		// 尝试通过DHT查找这个peer的用户信息
 		// 方法：尝试查找常见的用户名，或者通过peer ID来推断
 		// 由于我们不知道用户名，我们尝试一些常见的方法：
 		// 1. 尝试使用peer ID的短格式作为用户名
 		// 2. 尝试查找所有已知的用户名
-		
+
 		// 获取已知的用户名列表（从本地缓存）
 		dd.mutex.RLock()
 		knownUsernames := make([]string, 0, len(dd.localUsers))
@@ -323,7 +342,7 @@ func (dd *DHTDiscovery) discoverNetworkUsers(ctx context.Context) {
 			knownUsernames = append(knownUsernames, username)
 		}
 		dd.mutex.RUnlock()
-		
+
 		// 尝试通过已知的用户名来查找
 		found := false
 		for _, username := range knownUsernames {
@@ -335,7 +354,7 @@ func (dd *DHTDiscovery) discoverNetworkUsers(ctx context.Context) {
 				break
 			}
 		}
-		
+
 		// 如果没有找到，尝试查找常见的用户名
 		if !found {
 			commonUsernames := []string{"Alice", "Bob", "Charlie", "David", "Eve", "Frank", "Grace", "Henry"}
@@ -349,7 +368,7 @@ func (dd *DHTDiscovery) discoverNetworkUsers(ctx context.Context) {
 				}
 			}
 		}
-		
+
 		// 如果还是没有找到，尝试通过DHT路由表来发现
 		// 获取DHT路由表中的所有peer
 		routingTable := dd.dht.RoutingTable()
@@ -360,7 +379,7 @@ func (dd *DHTDiscovery) discoverNetworkUsers(ctx context.Context) {
 			// 这里我们简化实现：通过已连接的peer来发现用户
 		}
 	}
-	
+
 	if discoveredCount > 0 {
 		log.Printf("✅ 发现了 %d 个新用户\n", discoveredCount)
 	}
@@ -370,7 +389,7 @@ func (dd *DHTDiscovery) discoverNetworkUsers(ctx context.Context) {
 func (dd *DHTDiscovery) GetUserByPeerID(peerID string) *UserInfo {
 	dd.mutex.RLock()
 	defer dd.mutex.RUnlock()
-	
+
 	if userInfo, exists := dd.peerIDToUser[peerID]; exists {
 		// 检查是否过期
 		if time.Now().Unix()-userInfo.Timestamp < int64(userInfoTTL.Seconds()) {
@@ -414,4 +433,3 @@ func (dd *DHTDiscovery) getAddresses() []string {
 func (dd *DHTDiscovery) Close() error {
 	return dd.dht.Close()
 }
-
