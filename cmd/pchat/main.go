@@ -707,6 +707,18 @@ func sendFile(filePath string) {
 	fmt.Printf("✅ 文件已发送\n")
 }
 
+// RPSGame 存储游戏状态
+type RPSGame struct {
+	Players         map[string]string // 用户名 -> 选择
+	ExpectedPlayers int              // 期望的玩家数量
+	Initiator       string           // 游戏发起者
+	Mutex           sync.RWMutex
+}
+
+// 全局游戏实例
+var currentRPSGame *RPSGame
+var rpsGameMutex sync.RWMutex
+
 // 石头剪刀布游戏选项
 const (
 	Rock     = "石头"
@@ -720,17 +732,6 @@ const (
 	RPSTie  = "平局"
 	RPSLose = "输"
 )
-
-// RPSGame 存储游戏状态
-type RPSGame struct {
-	Players         map[string]string // 用户名 -> 选择
-	ExpectedPlayers int               // 期望的玩家数量
-	Mutex           sync.RWMutex
-}
-
-// 全局游戏实例
-var currentRPSGame *RPSGame
-var rpsGameMutex sync.RWMutex
 
 // 石头剪刀布游戏选项映射
 var rpsOptions = []string{Rock, Paper, Scissors}
@@ -747,7 +748,7 @@ func determineWinner(choice1, choice2 string) string {
 	if choice1 == choice2 {
 		return RPSTie
 	}
-
+	
 	switch choice1 {
 	case Rock:
 		if choice2 == Scissors {
@@ -780,14 +781,13 @@ func determineMultiPlayerWinner(choices map[string]string) []string {
 
 	// 统计每个玩家的胜负情况
 	winCounts := make(map[string]int)
-	lossCounts := make(map[string]int)
-
+	
 	// 获取所有玩家列表
 	players := make([]string, 0, len(choices))
 	for player := range choices {
 		players = append(players, player)
 	}
-
+	
 	// 两两比较
 	for i, player1 := range players {
 		choice1 := choices[player1]
@@ -795,21 +795,19 @@ func determineMultiPlayerWinner(choices map[string]string) []string {
 			if i >= j {
 				continue
 			}
-
+			
 			choice2 := choices[player2]
 			result := determineWinner(choice1, choice2)
-
+			
 			switch result {
 			case RPSWin:
 				winCounts[player1]++
-				lossCounts[player2]++
 			case RPSLose:
 				winCounts[player2]++
-				lossCounts[player1]++
 			}
 		}
 	}
-
+	
 	// 找出胜场最多的玩家
 	maxWins := -1
 	for _, wins := range winCounts {
@@ -817,7 +815,7 @@ func determineMultiPlayerWinner(choices map[string]string) []string {
 			maxWins = wins
 		}
 	}
-
+	
 	// 收集所有胜场最多的玩家
 	winners := make([]string, 0)
 	for player, wins := range winCounts {
@@ -825,12 +823,12 @@ func determineMultiPlayerWinner(choices map[string]string) []string {
 			winners = append(winners, player)
 		}
 	}
-
+	
 	// 如果没有胜场数（都是平局），则所有玩家都是胜者
 	if len(winners) == 0 {
 		winners = players
 	}
-
+	
 	return winners
 }
 
@@ -849,6 +847,7 @@ func playRPS() {
 	rpsGameMutex.Lock()
 	currentRPSGame.Mutex.Lock()
 	currentRPSGame.Players = make(map[string]string)
+	currentRPSGame.Initiator = globalUsername
 	currentRPSGame.ExpectedPlayers = len(connections) + 1 // +1 是自己
 	currentRPSGame.Mutex.Unlock()
 	rpsGameMutex.Unlock()
@@ -909,7 +908,7 @@ func handleRPSGame(message string, senderIDStr string) {
 		senderUsername = globalUsernameMap[senderIDStr]
 	}
 	globalVarsMutex.RUnlock()
-
+	
 	// 如果没有映射到用户名，使用节点ID的短格式
 	if senderUsername == "" {
 		peerID, err := peer.Decode(senderIDStr)
@@ -930,15 +929,21 @@ func handleRPSGame(message string, senderIDStr string) {
 		senderChoice = Scissors
 	}
 
+	// 重置游戏状态并设置发起者
+	rpsGameMutex.Lock()
+	currentRPSGame.Mutex.Lock()
+	// 设置游戏发起者
+	currentRPSGame.Initiator = senderUsername
+	// 设置期望玩家数量
+	connections := getAllConnections()
+	currentRPSGame.ExpectedPlayers = len(connections) + 1 // +1 是发起者
+	currentRPSGame.Mutex.Unlock()
+	rpsGameMutex.Unlock()
+
 	if senderChoice != "" {
 		// 保存发送者的选择
 		rpsGameMutex.Lock()
 		currentRPSGame.Mutex.Lock()
-		// 设置期望玩家数量（发起者 + 所有连接的用户）
-		if currentRPSGame.ExpectedPlayers == 0 {
-			connections := getAllConnections()
-			currentRPSGame.ExpectedPlayers = len(connections) + 1 // +1 是发起者
-		}
 		currentRPSGame.Players[senderUsername] = senderChoice
 		currentRPSGame.Mutex.Unlock()
 		rpsGameMutex.Unlock()
@@ -957,11 +962,6 @@ func handleRPSGame(message string, senderIDStr string) {
 		// 保存自己的选择
 		rpsGameMutex.Lock()
 		currentRPSGame.Mutex.Lock()
-		// 设置期望玩家数量（发起者 + 所有连接的用户）
-		if currentRPSGame.ExpectedPlayers == 0 {
-			connections := getAllConnections()
-			currentRPSGame.ExpectedPlayers = len(connections) + 1 // +1 是发起者
-		}
 		currentRPSGame.Players[globalUsername] = myChoice
 		currentRPSGame.Mutex.Unlock()
 		rpsGameMutex.Unlock()
@@ -993,17 +993,17 @@ func handleRPSGame(message string, senderIDStr string) {
 					log.Printf("发送回应消息失败: %v\n", err)
 					continue
 				}
-
+				
 				fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
 				break
 			}
 		}
-
+		
 		// 如果没有找到发送者在连接列表中，可能是发起者自己
 		if !foundSender {
 			fmt.Printf("🎮 %s 的回应: %s\n", globalUsername, myChoice)
 		}
-
+		
 		// 检查是否所有玩家都已选择
 		checkAndShowRPSResults()
 	}
@@ -1020,7 +1020,7 @@ func handleRPSResponse(message string, senderIDStr string) {
 		senderUsername = globalUsernameMap[senderIDStr]
 	}
 	globalVarsMutex.RUnlock()
-
+	
 	// 如果没有映射到用户名，使用节点ID的短格式
 	if senderUsername == "" {
 		peerID, err := peer.Decode(senderIDStr)
@@ -1058,13 +1058,13 @@ func handleRPSResponse(message string, senderIDStr string) {
 func checkAndShowRPSResults() {
 	rpsGameMutex.RLock()
 	currentRPSGame.Mutex.RLock()
-
+	
 	// 检查是否所有玩家都已选择
 	if len(currentRPSGame.Players) >= currentRPSGame.ExpectedPlayers && currentRPSGame.ExpectedPlayers > 0 {
 		// 显示游戏结果
 		showRPSResults()
 	}
-
+	
 	currentRPSGame.Mutex.RUnlock()
 	rpsGameMutex.RUnlock()
 }
@@ -1073,26 +1073,26 @@ func checkAndShowRPSResults() {
 func showRPSResults() {
 	fmt.Println("\n🎮 石头剪刀布游戏结果:")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
+	
 	// 显示所有玩家的选择
 	rpsGameMutex.RLock()
 	currentRPSGame.Mutex.RLock()
-
+	
 	players := make([]string, 0, len(currentRPSGame.Players))
 	for player := range currentRPSGame.Players {
 		players = append(players, player)
 	}
-
+	
 	// 按用户名排序以便显示一致
 	sort.Strings(players)
-
+	
 	// 显示所有玩家的选择
 	for _, player := range players {
 		choice := currentRPSGame.Players[player]
 		fmt.Printf("👤 %s: %s\n", player, choice)
 	}
-
-	// 计算并显示输赢结果
+	
+	// 计算并显示最终胜者
 	fmt.Println("\n🏆 最终结果:")
 	winners := determineMultiPlayerWinner(currentRPSGame.Players)
 	if len(winners) == 1 {
@@ -1109,10 +1109,10 @@ func showRPSResults() {
 	} else {
 		fmt.Println("🤔 没有明确的胜者")
 	}
-
+	
 	currentRPSGame.Mutex.RUnlock()
 	rpsGameMutex.RUnlock()
-
+	
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Print("> ")
 }
