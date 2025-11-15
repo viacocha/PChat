@@ -669,18 +669,12 @@ func callUser(target string, registryClient *RegistryClient, dhtDiscovery *disco
 		return
 	}
 
-	// 交换公钥
-	if err := exchangePublicKeys(stream, peerIDStr); err != nil {
-		log.Printf("公钥交换失败: %v\n", err)
-		stream.Close()
-		return
-	}
-
+	// 主动连接方不需要在这里交换公钥，公钥交换会在handleStream中处理
 	// 添加连接到活动连接列表
 	addConnection(peerIDStr, stream)
 
 	fmt.Printf("✅ 已连接到 %s\n", peerIDStr)
-	fmt.Printf("✅ 已与 %s (%s) 交换公钥，可以开始聊天了！\n", target, peerIDStr)
+	fmt.Printf("✅ 连接已建立，可以开始聊天了！\n")
 }
 
 // 发送文件
@@ -1344,7 +1338,6 @@ func exchangePublicKeysIncoming(stream network.Stream, peerID string) error {
 	}
 
 	fmt.Printf("\n🔐 用户 %s 已连接并交换公钥\n", receivedKey.Username)
-	fmt.Print("> ")
 	return nil
 }
 
