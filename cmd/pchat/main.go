@@ -285,10 +285,21 @@ var connectionsMutex sync.RWMutex
 var userPublicKeys map[string]*rsa.PublicKey
 var publicKeyMutex sync.RWMutex
 
+// 当前用户的密钥对
+var currentUserPrivateKey *rsa.PrivateKey
+var currentUserPublicKey rsa.PublicKey
+
 // 初始化连接管理
 func init() {
 	activeConnections = make(map[string]network.Stream)
 	userPublicKeys = make(map[string]*rsa.PublicKey)
+
+	// 生成当前用户的密钥对
+	var err error
+	currentUserPrivateKey, currentUserPublicKey, err = crypto.GenerateKeys()
+	if err != nil {
+		log.Fatal("生成用户密钥对失败:", err)
+	}
 }
 
 // 添加连接
@@ -356,13 +367,6 @@ func notifyOffline() {
 		return
 	}
 
-	// 生成密钥对用于签名
-	privKey, pubKey, err := crypto.GenerateKeys()
-	if err != nil {
-		log.Printf("生成密钥对失败: %v\n", err)
-		return
-	}
-
 	offlineMsg := fmt.Sprintf("%s 已下线", username)
 	sentCount := 0
 
@@ -371,11 +375,11 @@ func notifyOffline() {
 		recipientPubKey, exists := getUserPublicKey(peerID)
 		if !exists {
 			// 如果没有公钥，使用我们自己的公钥作为示例
-			recipientPubKey = &pubKey
+			recipientPubKey = &currentUserPublicKey
 		}
 
 		// 加密下线通知消息
-		encryptedMsg, err := crypto.EncryptAndSignMessage(offlineMsg, privKey, recipientPubKey)
+		encryptedMsg, err := crypto.EncryptAndSignMessage(offlineMsg, currentUserPrivateKey, recipientPubKey)
 		if err != nil {
 			log.Printf("加密下线通知失败: %v\n", err)
 			continue
@@ -452,25 +456,17 @@ func sendMessageToAll(message string) {
 		return
 	}
 
-	// 获取当前用户的私钥（简化实现，实际应该从密钥管理器获取）
-	// 这里我们生成一个临时密钥对用于演示
-	privKey, pubKey, err := crypto.GenerateKeys()
-	if err != nil {
-		log.Printf("生成密钥对失败: %v\n", err)
-		return
-	}
-
 	sentCount := 0
 	for peerID, stream := range connections {
 		// 获取接收方公钥
 		recipientPubKey, exists := getUserPublicKey(peerID)
 		if !exists {
 			// 如果没有公钥，使用我们自己的公钥作为示例
-			recipientPubKey = &pubKey
+			recipientPubKey = &currentUserPublicKey
 		}
 
 		// 加密消息
-		encryptedMsg, err := crypto.EncryptAndSignMessage(message, privKey, recipientPubKey)
+		encryptedMsg, err := crypto.EncryptAndSignMessage(message, currentUserPrivateKey, recipientPubKey)
 		if err != nil {
 			log.Printf("加密消息失败: %v\n", err)
 			continue
@@ -734,13 +730,6 @@ func playRPS() {
 	myChoiceIndex := rand.Intn(len(rpsOptions))
 	myChoice := rpsOptions[myChoiceIndex]
 
-	// 生成密钥对用于签名
-	privKey, pubKey, err := crypto.GenerateKeys()
-	if err != nil {
-		log.Printf("生成密钥对失败: %v\n", err)
-		return
-	}
-
 	// 发送游戏邀请和自己的选择给所有连接的用户
 	gameMsg := fmt.Sprintf("🎮 %s 发起石头剪刀布游戏，我的选择是: %s", globalUsername, myChoice)
 	sentCount := 0
@@ -750,11 +739,11 @@ func playRPS() {
 		recipientPubKey, exists := getUserPublicKey(peerID)
 		if !exists {
 			// 如果没有公钥，使用我们自己的公钥作为示例
-			recipientPubKey = &pubKey
+			recipientPubKey = &currentUserPublicKey
 		}
 
 		// 加密游戏消息
-		encryptedMsg, err := crypto.EncryptAndSignMessage(gameMsg, privKey, recipientPubKey)
+		encryptedMsg, err := crypto.EncryptAndSignMessage(gameMsg, currentUserPrivateKey, recipientPubKey)
 		if err != nil {
 			log.Printf("加密游戏消息失败: %v\n", err)
 			continue
@@ -772,6 +761,84 @@ func playRPS() {
 
 	fmt.Printf("✅ 已向 %d 个用户发送游戏邀请，我的选择是: %s\n", sentCount, myChoice)
 	fmt.Println("💡 等待其他玩家的选择...")
+}
+
+// handleStream 处理流上的消息
+func handleStream(stream network.Stream) {
+	defer stream.Close()
+
+	// 设置协议ID
+	stream.SetProtocol(protocolID)
+
+	reader := bufio.NewReader(stream)
+	for {
+		// 读取消息
+		message, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Printf("读取消息失败: %v\n", err)
+			break
+		}
+
+		message = strings.TrimSpace(message)
+		if message == "" {
+			continue
+		}
+
+		// 解密并验证消息
+		// 使用当前用户的私钥和发送方的公钥进行解密和验证
+		senderID := stream.Conn().RemotePeer()
+		senderPubKey, exists := getUserPublicKey(senderID.String())
+		if !exists {
+			// 如果没有发送方的公钥，使用我们自己的公钥作为示例
+			senderPubKey = &currentUserPublicKey
+		}
+
+		decryptedMsg, verified, err := crypto.DecryptAndVerifyMessage(message, currentUserPrivateKey, *senderPubKey)
+		if err != nil {
+			log.Printf("解密消息失败: %v\n", err)
+			continue
+		}
+
+		// 检查消息类型
+		switch {
+		case strings.Contains(decryptedMsg, "已下线"):
+			fmt.Printf("\n📢 %s\n", decryptedMsg)
+		case strings.Contains(decryptedMsg, "石头剪刀布游戏"):
+			// 处理石头剪刀布游戏消息
+			fmt.Printf("\n%s\n", decryptedMsg)
+
+			// 如果是游戏发起者，不需要再回应
+			if strings.Contains(decryptedMsg, fmt.Sprintf("%s 发起石头剪刀布游戏", globalUsername)) {
+				break
+			}
+
+			// 生成自己的随机选择并回应
+			rand.Seed(time.Now().UnixNano())
+			myChoiceIndex := rand.Intn(len(rpsOptions))
+			myChoice := rpsOptions[myChoiceIndex]
+
+			// 发送回应消息
+			responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
+			fmt.Printf("%s\n", responseMsg)
+		default:
+			// 显示普通消息
+			senderShortID := senderID.ShortString()
+			if verified {
+				fmt.Printf("\n📨 收到来自 %s 的消息:\n", senderShortID)
+				fmt.Printf("💬 消息内容: %s\n", decryptedMsg)
+				fmt.Printf("✅ 消息已验证（签名有效，未检测到重放攻击）\n")
+			} else {
+				fmt.Printf("\n📨 收到来自 %s 的消息:\n", senderShortID)
+				fmt.Printf("⚠️  警告消息: %s（签名验证失败或检测到异常）\n", decryptedMsg)
+			}
+		}
+
+		// 重新显示提示符
+		fmt.Print("> ")
+	}
 }
 
 // networkNotifyee 网络通知处理器，用于在连接建立时自动发现用户信息
@@ -819,84 +886,6 @@ func (n *networkNotifyee) OpenedStream(net network.Network, stream network.Strea
 // ClosedStream 当关闭流时调用
 func (n *networkNotifyee) ClosedStream(network.Network, network.Stream) {
 	// 不需要处理
-}
-
-// handleStream 处理流上的消息
-func handleStream(stream network.Stream) {
-	defer stream.Close()
-
-	// 设置协议ID
-	stream.SetProtocol(protocolID)
-
-	reader := bufio.NewReader(stream)
-	for {
-		// 读取消息
-		message, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			log.Printf("读取消息失败: %v\n", err)
-			break
-		}
-
-		message = strings.TrimSpace(message)
-		if message == "" {
-			continue
-		}
-
-		// 解密并验证消息
-		// 这里需要获取接收方的私钥和发送方的公钥
-		// 简化实现：生成临时密钥对用于演示
-		privKey, pubKey, err := crypto.GenerateKeys()
-		if err != nil {
-			log.Printf("生成密钥对失败: %v\n", err)
-			continue
-		}
-
-		decryptedMsg, verified, err := crypto.DecryptAndVerifyMessage(message, privKey, pubKey)
-		if err != nil {
-			log.Printf("解密消息失败: %v\n", err)
-			continue
-		}
-
-		// 检查消息类型
-		switch {
-		case strings.Contains(decryptedMsg, "已下线"):
-			fmt.Printf("\n📢 %s\n", decryptedMsg)
-		case strings.Contains(decryptedMsg, "石头剪刀布游戏"):
-			// 处理石头剪刀布游戏消息
-			fmt.Printf("\n%s\n", decryptedMsg)
-			
-			// 如果是游戏发起者，不需要再回应
-			if strings.Contains(decryptedMsg, fmt.Sprintf("%s 发起石头剪刀布游戏", globalUsername)) {
-				break
-			}
-			
-			// 生成自己的随机选择并回应
-			rand.Seed(time.Now().UnixNano())
-			myChoiceIndex := rand.Intn(len(rpsOptions))
-			myChoice := rpsOptions[myChoiceIndex]
-			
-			// 发送回应消息
-			responseMsg := fmt.Sprintf("🎮 %s 的回应: %s", globalUsername, myChoice)
-			fmt.Printf("%s\n", responseMsg)
-		default:
-			// 显示普通消息
-			senderID := stream.Conn().RemotePeer().ShortString()
-			if verified {
-				fmt.Printf("\n📨 收到来自 %s 的消息:\n", senderID)
-				fmt.Printf("💬 消息内容: %s\n", decryptedMsg)
-				fmt.Printf("✅ 消息已验证（签名有效，未检测到重放攻击）\n")
-			} else {
-				fmt.Printf("\n📨 收到来自 %s 的消息:\n", senderID)
-				fmt.Printf("⚠️  警告消息: %s（签名验证失败或检测到异常）\n", decryptedMsg)
-			}
-		}
-
-		// 重新显示提示符
-		fmt.Print("> ")
-	}
 }
 
 // main 主函数
