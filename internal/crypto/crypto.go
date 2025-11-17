@@ -42,6 +42,17 @@ func GenerateKeys() (*rsa.PrivateKey, rsa.PublicKey, error) {
 
 // EncryptAndSignMessage encrypts a message and adds a digital signature
 func EncryptAndSignMessage(msg string, senderPrivKey *rsa.PrivateKey, recipientPubKey *rsa.PublicKey) (string, error) {
+	// 输入验证
+	if senderPrivKey == nil {
+		return "", fmt.Errorf("sender private key cannot be nil")
+	}
+	if recipientPubKey == nil {
+		return "", fmt.Errorf("recipient public key cannot be nil")
+	}
+	if recipientPubKey.N == nil {
+		return "", fmt.Errorf("recipient public key is invalid (N is nil)")
+	}
+	
 	// 1. Generate random nonce (to prevent replay attacks)
 	nonce := make([]byte, NonceSize)
 	if _, err := rand.Read(nonce); err != nil {
@@ -96,11 +107,22 @@ func EncryptAndSignMessage(msg string, senderPrivKey *rsa.PrivateKey, recipientP
 
 // EncryptMessageWithPubKey encrypts a message using AES and RSA with the recipient's public key
 func EncryptMessageWithPubKey(msg []byte, pubKey *rsa.PublicKey) ([]byte, error) {
+	// 输入验证
+	if pubKey == nil {
+		return nil, fmt.Errorf("public key cannot be nil")
+	}
+	if pubKey.N == nil {
+		return nil, fmt.Errorf("public key is invalid (N is nil)")
+	}
+	if len(msg) == 0 {
+		return nil, fmt.Errorf("message cannot be empty")
+	}
+	
 	// Generate a random AES key for encryption
 	aesKey := make([]byte, 32) // 256-bit key
 	_, err := rand.Read(aesKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to generate AES key: %v", err)
 	}
 
 	// Encrypt the message with AES
@@ -122,6 +144,17 @@ func EncryptMessageWithPubKey(msg []byte, pubKey *rsa.PublicKey) ([]byte, error)
 
 // DecryptAndVerifyMessage decrypts a message and verifies the signature and replay attacks
 func DecryptAndVerifyMessage(encryptedMsg string, recipientPrivKey *rsa.PrivateKey, senderID rsa.PublicKey) (string, bool, error) {
+	// 输入验证
+	if recipientPrivKey == nil {
+		return "", false, fmt.Errorf("recipient private key cannot be nil")
+	}
+	if senderID.N == nil {
+		return "", false, fmt.Errorf("sender public key is invalid (N is nil)")
+	}
+	if encryptedMsg == "" {
+		return "", false, fmt.Errorf("encrypted message cannot be empty")
+	}
+	
 	// 1. Decode base64
 	secureMsgJSON, err := base64.StdEncoding.DecodeString(encryptedMsg)
 	if err != nil {
@@ -180,8 +213,12 @@ func DecryptAndVerifyMessage(encryptedMsg string, recipientPrivKey *rsa.PrivateK
 
 // DecryptMessage decrypts an AES-encrypted message using RSA
 func DecryptMessage(encryptedData []byte, privKey *rsa.PrivateKey) ([]byte, error) {
+	// 输入验证
+	if privKey == nil {
+		return nil, fmt.Errorf("private key cannot be nil")
+	}
 	if len(encryptedData) < 256 {
-		return nil, fmt.Errorf("encrypted data too short")
+		return nil, fmt.Errorf("encrypted data too short (expected at least 256 bytes, got %d)", len(encryptedData))
 	}
 
 	// Extract encrypted AES key and the message ciphertext
@@ -205,9 +242,17 @@ func DecryptMessage(encryptedData []byte, privKey *rsa.PrivateKey) ([]byte, erro
 
 // aesEncrypt performs AES encryption
 func aesEncrypt(msg []byte, key []byte) ([]byte, error) {
+	// 输入验证
+	if len(key) != 32 {
+		return nil, fmt.Errorf("AES key must be 32 bytes (256 bits), got %d bytes", len(key))
+	}
+	if len(msg) == 0 {
+		return nil, fmt.Errorf("message cannot be empty")
+	}
+	
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create AES cipher: %v", err)
 	}
 	ciphertext := make([]byte, aes.BlockSize+len(msg))
 	iv := ciphertext[:aes.BlockSize]
@@ -222,12 +267,17 @@ func aesEncrypt(msg []byte, key []byte) ([]byte, error) {
 
 // aesDecrypt performs AES decryption
 func aesDecrypt(ciphertext []byte, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
+	// 输入验证
+	if len(key) != 32 {
+		return nil, fmt.Errorf("AES key must be 32 bytes (256 bits), got %d bytes", len(key))
 	}
 	if len(ciphertext) < aes.BlockSize {
-		return nil, fmt.Errorf("ciphertext too short")
+		return nil, fmt.Errorf("ciphertext too short (expected at least %d bytes, got %d)", aes.BlockSize, len(ciphertext))
+	}
+	
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AES cipher: %v", err)
 	}
 	iv := ciphertext[:aes.BlockSize]
 	ciphertext = ciphertext[aes.BlockSize:]

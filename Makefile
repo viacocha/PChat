@@ -21,7 +21,10 @@ BIN_DIR := bin
 INTERNAL_DIR := internal
 
 # 源码路径
-PCHAT_MAIN := $(CMD_DIR)/pchat/main.go
+PCHAT_DIR := $(CMD_DIR)/pchat
+PCHAT_MAIN := $(PCHAT_DIR)/main.go
+PCHAT_DHT := $(PCHAT_DIR)/dht_discovery.go
+PCHAT_REGISTRY := $(PCHAT_DIR)/registry.go
 REGISTRY_MAIN := $(CMD_DIR)/registry/main.go
 
 # 二进制文件路径
@@ -35,10 +38,11 @@ all: build
 build: $(PCHAT_BINARY) $(REGISTRY_BINARY)
 
 # 构建pchat客户端
-$(PCHAT_BINARY): $(PCHAT_MAIN)
+PCHAT_SOURCES := $(PCHAT_MAIN) $(PCHAT_DHT) $(PCHAT_REGISTRY)
+$(PCHAT_BINARY): $(PCHAT_SOURCES)
 	@echo "Building pchat client..."
 	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $@ ./$(CMD_DIR)/pchat
+	$(GOBUILD) -o $@ ./$(PCHAT_DIR)
 
 # 构建注册服务器
 $(REGISTRY_BINARY): $(REGISTRY_MAIN)

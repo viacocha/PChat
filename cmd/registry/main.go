@@ -1,17 +1,19 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
-
-	"encoding/json"
 )
 
 const (
@@ -21,10 +23,11 @@ const (
 
 // ClientInfo 客户端信息
 type ClientInfo struct {
-	PeerID    string    `json:"peer_id"`
-	Addresses []string  `json:"addresses"`
-	Username  string    `json:"username"`
-	LastSeen  time.Time `json:"last_seen"`
+	PeerID       string    `json:"peer_id"`
+	Addresses    []string  `json:"addresses"`
+	Username     string    `json:"username"`
+	LastSeen     time.Time `json:"last_seen"`
+	RegisterTime time.Time `json:"register_time"` // 注册时间
 }
 
 // RegistryMessage 注册消息
@@ -48,6 +51,7 @@ type RegistryResponse struct {
 type RegistryServer struct {
 	clients map[string]*ClientInfo
 	mutex   sync.RWMutex
+	ui      *RegistryUI // UI引用，可选
 }
 
 // NewRegistryServer 创建注册服务器
@@ -73,7 +77,16 @@ func (rs *RegistryServer) cleanupExpiredClients() {
 		for id, client := range rs.clients {
 			if now.Sub(client.LastSeen) > heartbeatTimeout*2 {
 				delete(rs.clients, id)
-				log.Printf("客户端 %s (%s) 已过期，已移除\n", id, client.Username)
+				peerIDDisplay := id
+				if len(peerIDDisplay) > 12 {
+					peerIDDisplay = peerIDDisplay[:12] + "..."
+				}
+				eventMsg := fmt.Sprintf("[yellow]⏰ 客户端过期[white]: [cyan]%s[white] (节点ID: [yellow]%s[white])", client.Username, peerIDDisplay)
+				if rs.ui != nil {
+					rs.ui.AddEvent(eventMsg)
+				} else {
+					log.Printf("客户端 %s (%s) 已过期，已移除\n", id, client.Username)
+				}
 			}
 		}
 		rs.mutex.Unlock()
@@ -98,16 +111,34 @@ func (rs *RegistryServer) handleRequest(conn net.Conn) {
 	switch msg.Type {
 	case "register":
 		rs.mutex.Lock()
+		now := time.Now()
+		// 如果是新注册，记录注册时间；如果是重新注册，保持原有注册时间
+		var registerTime time.Time
+		if existingClient, exists := rs.clients[msg.PeerID]; exists {
+			registerTime = existingClient.RegisterTime // 保持原有注册时间
+		} else {
+			registerTime = now // 新注册，使用当前时间
+		}
 		rs.clients[msg.PeerID] = &ClientInfo{
-			PeerID:    msg.PeerID,
-			Addresses: msg.Addresses,
-			Username:  msg.Username,
-			LastSeen:  time.Now(),
+			PeerID:       msg.PeerID,
+			Addresses:    msg.Addresses,
+			Username:     msg.Username,
+			LastSeen:     now,
+			RegisterTime: registerTime,
 		}
 		rs.mutex.Unlock()
 		response.Success = true
 		response.Message = "注册成功"
-		log.Printf("客户端 %s (%s) 已注册\n", msg.PeerID, msg.Username)
+		peerIDDisplay := msg.PeerID
+		if len(peerIDDisplay) > 12 {
+			peerIDDisplay = peerIDDisplay[:12] + "..."
+		}
+		eventMsg := fmt.Sprintf("[green]✅ 客户端注册[white]: [cyan]%s[white] (节点ID: [yellow]%s[white])", msg.Username, peerIDDisplay)
+		if rs.ui != nil {
+			rs.ui.AddEvent(eventMsg)
+		} else {
+			log.Printf("客户端 %s (%s) 已注册\n", msg.PeerID, msg.Username)
+		}
 
 	case "unregister":
 		rs.mutex.Lock()
@@ -115,7 +146,16 @@ func (rs *RegistryServer) handleRequest(conn net.Conn) {
 			delete(rs.clients, msg.PeerID)
 			response.Success = true
 			response.Message = "注销成功"
-			log.Printf("客户端 %s (%s) 已注销\n", msg.PeerID, client.Username)
+			peerIDDisplay := msg.PeerID
+			if len(peerIDDisplay) > 12 {
+				peerIDDisplay = peerIDDisplay[:12] + "..."
+			}
+			eventMsg := fmt.Sprintf("[red]❌ 客户端注销[white]: [cyan]%s[white] (节点ID: [yellow]%s[white])", client.Username, peerIDDisplay)
+			if rs.ui != nil {
+				rs.ui.AddEvent(eventMsg)
+			} else {
+				log.Printf("客户端 %s (%s) 已注销\n", msg.PeerID, client.Username)
+			}
 		} else {
 			response.Success = false
 			response.Message = "客户端未注册"
@@ -128,6 +168,9 @@ func (rs *RegistryServer) handleRequest(conn net.Conn) {
 			client.LastSeen = time.Now()
 			response.Success = true
 			response.Message = "心跳成功"
+			if rs.ui != nil {
+				rs.ui.AddStatusMessage(fmt.Sprintf("收到心跳: %s", client.Username))
+			}
 		} else {
 			response.Success = false
 			response.Message = "客户端未注册"
@@ -197,23 +240,92 @@ func (rs *RegistryServer) Start(port int) error {
 }
 
 func main() {
-	port := flag.Int("port", registryPort, "注册服务器端口")
+	port := flag.Int("port", registryPort, "注册服务器端口，格式：数字，默认：8888")
+	uiFlag := flag.String("ui", "true", "是否使用视窗化UI界面，格式：true/false，默认：true")
 	flag.Parse()
+
+	// 解析UI标志
+	useUI := true
+	if *uiFlag != "" {
+		uiFlagLower := strings.ToLower(strings.TrimSpace(*uiFlag))
+		useUI = uiFlagLower == "true" || uiFlagLower == "1" || uiFlagLower == "yes" || uiFlagLower == "on"
+	}
+
+	// 创建上下文
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	server := NewRegistryServer()
 
-	// 处理中断信号
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	var ui *RegistryUI
+	if useUI {
+		// 创建并启动UI
+		ui = NewRegistryUI(ctx, server, *port)
+		server.ui = ui // 设置UI引用
 
-	go func() {
-		<-sigCh
-		log.Println("\n🛑 正在关闭注册服务器...")
-		os.Exit(0)
-	}()
+		// 显示启动信息
+		ui.AddEvent(fmt.Sprintf("[green]🚀 注册服务器已启动[white]，监听端口 [cyan]%d[white]", *port))
 
-	log.Printf("🚀 启动注册服务器，端口: %d\n", *port)
-	if err := server.Start(*port); err != nil {
-		log.Fatalf("服务器启动失败: %v\n", err)
+		// 在goroutine中运行UI
+		uiDone := make(chan struct{})
+		go func() {
+			defer close(uiDone)
+			if err := ui.Run(); err != nil {
+				log.Printf("UI运行错误: %v\n", err)
+			}
+		}()
+
+		// 处理中断信号（UI模式）
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+		// 在goroutine中运行服务器
+		serverDone := make(chan error, 1)
+		go func() {
+			serverDone <- server.Start(*port)
+		}()
+
+		select {
+		case <-sigCh:
+			ui.AddEvent("[yellow]🛑 收到关闭信号，正在退出...[white]")
+			time.Sleep(500 * time.Millisecond)
+			cancel()
+			ui.Stop()
+		case <-uiDone:
+			// UI已退出
+			cancel()
+		case err := <-serverDone:
+			if err != nil {
+				ui.AddEvent(fmt.Sprintf("[red]❌ 服务器错误: %v[white]", err))
+				time.Sleep(2 * time.Second)
+			}
+			cancel()
+			ui.Stop()
+		}
+	} else {
+		// 非UI模式：直接运行服务器
+		log.Printf("🚀 注册服务器已启动，监听端口 %d\n", *port)
+		log.Printf("💡 提示：使用 -ui true 启用视窗化界面\n")
+
+		// 处理中断信号（非UI模式）
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+		// 在goroutine中运行服务器
+		serverDone := make(chan error, 1)
+		go func() {
+			serverDone <- server.Start(*port)
+		}()
+
+		select {
+		case <-sigCh:
+			log.Printf("\n🛑 收到关闭信号，正在退出...\n")
+			cancel()
+		case err := <-serverDone:
+			if err != nil {
+				log.Printf("❌ 服务器错误: %v\n", err)
+			}
+			cancel()
+		}
 	}
 }
