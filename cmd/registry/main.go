@@ -54,7 +54,14 @@ type RegistryServer struct {
 	ui      *RegistryUI // UI引用，可选
 }
 
-// NewRegistryServer 创建注册服务器
+// NewRegistryServer 创建新的注册服务器实例
+// 该函数初始化注册服务器并启动清理过期客户端的后台 goroutine
+//
+// 返回:
+//   - *RegistryServer: 注册服务器实例
+//
+// 该函数会启动一个定期清理过期客户端的 goroutine（每 10 秒检查一次）
+// 超过 2 倍心跳超时时间（60 秒）未发送心跳的客户端会被自动清理
 func NewRegistryServer() *RegistryServer {
 	rs := &RegistryServer{
 		clients: make(map[string]*ClientInfo),
@@ -67,6 +74,11 @@ func NewRegistryServer() *RegistryServer {
 }
 
 // cleanupExpiredClients 清理过期的客户端
+// 该函数在后台 goroutine 中定期运行，删除超过 2 倍心跳超时时间的客户端
+// 心跳超时时间为 30 秒，因此超过 60 秒未发送心跳的客户端会被清理
+//
+// 该函数会持续运行直到程序退出，每 10 秒检查一次
+// 清理操作会通过 UI 显示事件信息（如果 UI 可用）
 func (rs *RegistryServer) cleanupExpiredClients() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()

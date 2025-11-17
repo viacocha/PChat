@@ -30,7 +30,15 @@ type SecureMessage struct {
 	Nonce         []byte `json:"nonce"`          // Nonce for preventing replay attacks
 }
 
-// GenerateKeys generates a RSA public/private key pair
+// GenerateKeys 生成 RSA 公钥/私钥对
+// 该函数使用 2048 位密钥长度生成 RSA 密钥对
+//
+// 返回:
+//   - *rsa.PrivateKey: RSA 私钥
+//   - rsa.PublicKey: RSA 公钥
+//   - error: 如果生成失败则返回错误
+//
+// 该函数使用 crypto/rand 生成安全的随机密钥
 func GenerateKeys() (*rsa.PrivateKey, rsa.PublicKey, error) {
 	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -40,7 +48,23 @@ func GenerateKeys() (*rsa.PrivateKey, rsa.PublicKey, error) {
 	return privKey, pubKey, nil
 }
 
-// EncryptAndSignMessage encrypts a message and adds a digital signature
+// EncryptAndSignMessage 加密消息并添加数字签名
+// 该函数实现了端到端加密和消息认证：
+// 1. 生成随机 nonce 防止重放攻击
+// 2. 使用接收方公钥加密消息（AES + RSA 混合加密）
+// 3. 使用发送方私钥对消息进行数字签名
+// 4. 将加密数据和签名编码为 base64 JSON 字符串
+//
+// 参数:
+//   - msg: 要加密的明文消息
+//   - senderPrivKey: 发送方的 RSA 私钥，用于签名
+//   - recipientPubKey: 接收方的 RSA 公钥，用于加密
+//
+// 返回:
+//   - string: base64 编码的加密消息（JSON 格式）
+//   - error: 如果加密或签名失败则返回错误
+//
+// 该函数包含输入验证：检查密钥是否为 nil，确保消息安全
 func EncryptAndSignMessage(msg string, senderPrivKey *rsa.PrivateKey, recipientPubKey *rsa.PublicKey) (string, error) {
 	// 输入验证
 	if senderPrivKey == nil {
