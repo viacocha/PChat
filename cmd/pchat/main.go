@@ -22,6 +22,7 @@ import (
 	mathrand "math/rand"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -336,6 +337,29 @@ func main() {
 	// 使用字符串标志来支持 "-ui false" 和 "-ui=false" 两种格式
 	uiFlag := flag.String("ui", "false", "是否使用视窗化UI界面，格式：true/false，默认：false")
 	flag.Parse()
+
+	// 验证端口
+	if err := ValidatePort(*listenPort); err != nil {
+		log.Fatalf("端口验证失败: %v", err)
+	}
+
+	// 验证注册服务器地址
+	if *registryAddr != "" {
+		if err := ValidateRegistryAddress(*registryAddr); err != nil {
+			log.Fatalf("注册服务器地址验证失败: %v", err)
+		}
+	}
+
+	// 验证用户名
+	if *username != "" {
+		if err := ValidateUsername(*username); err != nil {
+			log.Printf("警告: 用户名验证失败: %v，将使用清理后的用户名\n", err)
+			*username = SanitizeUsername(*username)
+			if *username == "" {
+				log.Fatal("用户名无效，请提供有效的用户名")
+			}
+		}
+	}
 
 	// 解析UI标志，支持 "true", "false", "1", "0", "yes", "no" 等格式
 	useUI := false
@@ -896,14 +920,68 @@ func handleKeyExchange(s network.Stream, privKey *rsa.PrivateKey, pubKey rsa.Pub
 
 // 连接到指定的 peer
 func connectToPeer(h host.Host, targetAddr string, privKey *rsa.PrivateKey, pubKey rsa.PublicKey, dhtDiscovery *DHTDiscovery, ctx context.Context) {
+	// Panic 恢复
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("❌ connectToPeer panic 恢复: %v\n", r)
+			globalUIMutex.RLock()
+			ui := globalUI
+			globalUIMutex.RUnlock()
+			if ui != nil {
+				ui.AddMessage("系统", fmt.Sprintf("❌ 连接过程中发生错误: %v", r), true)
+			}
+		}
+	}()
+
+	// 输入验证
+	if h == nil {
+		log.Printf("❌ host 不能为 nil\n")
+		return
+	}
+	if privKey == nil {
+		log.Printf("❌ 私钥不能为 nil\n")
+		return
+	}
+	if err := ValidatePeerAddress(targetAddr); err != nil {
+		log.Printf("❌ peer 地址验证失败: %v\n", err)
+		globalUIMutex.RLock()
+		ui := globalUI
+		globalUIMutex.RUnlock()
+		if ui != nil {
+			ui.AddMessage("系统", fmt.Sprintf("❌ peer 地址无效: %v", err), true)
+		}
+		return
+	}
+
+	// 设置超时上下文
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	connectCtx, connectCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer connectCancel()
+
 	maddr, err := multiaddr.NewMultiaddr(targetAddr)
 	if err != nil {
-		log.Fatal("解析地址失败:", err)
+		log.Printf("❌ 解析地址失败: %v\n", err)
+		globalUIMutex.RLock()
+		ui := globalUI
+		globalUIMutex.RUnlock()
+		if ui != nil {
+			ui.AddMessage("系统", fmt.Sprintf("❌ 解析地址失败: %v", err), true)
+		}
+		return
 	}
 
 	info, err := peer.AddrInfoFromP2pAddr(maddr)
 	if err != nil {
-		log.Fatal("解析 peer 信息失败:", err)
+		log.Printf("❌ 解析 peer 信息失败: %v\n", err)
+		globalUIMutex.RLock()
+		ui := globalUI
+		globalUIMutex.RUnlock()
+		if ui != nil {
+			ui.AddMessage("系统", fmt.Sprintf("❌ 解析 peer 信息失败: %v", err), true)
+		}
+		return
 	}
 
 	h.Peerstore().AddAddrs(info.ID, info.Addrs, peerstore.PermanentAddrTTL)
@@ -915,14 +993,13 @@ func connectToPeer(h host.Host, targetAddr string, privKey *rsa.PrivateKey, pubK
 		ui.AddMessage("系统", fmt.Sprintf("🔗 正在连接到 %s...", info.ID.ShortString()), true)
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := h.Connect(ctx, *info); err != nil {
+	// 使用带超时的上下文连接
+	if err := h.Connect(connectCtx, *info); err != nil {
 		if ui != nil {
 			ui.AddMessage("系统", fmt.Sprintf("❌ 连接失败: %v", err), true)
 		}
-		log.Fatal("连接失败:", err)
+		log.Printf("❌ 连接失败: %v\n", err)
+		return
 	}
 
 	if ui != nil {
@@ -931,12 +1008,22 @@ func connectToPeer(h host.Host, targetAddr string, privKey *rsa.PrivateKey, pubK
 		log.Printf("✅ 已连接到 %s\n", info.ID)
 	}
 
-	// 交换公钥和用户名
-	stream, err := h.NewStream(ctx, info.ID, keyExchangeID)
+	// 交换公钥和用户名（使用带超时的上下文）
+	keyExchangeCtx, keyExchangeCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer keyExchangeCancel()
+	
+	stream, err := h.NewStream(keyExchangeCtx, info.ID, keyExchangeID)
 	if err != nil {
-		log.Fatal("创建密钥交换流失败:", err)
+		log.Printf("❌ 创建密钥交换流失败: %v\n", err)
+		if ui != nil {
+			ui.AddMessage("系统", fmt.Sprintf("❌ 创建密钥交换流失败: %v", err), true)
+		}
+		return
 	}
 	defer stream.Close()
+	
+	// 设置流超时
+	stream.SetDeadline(time.Now().Add(15 * time.Second))
 
 	// 获取自己的用户名
 	globalVarsMutex.RLock()
@@ -946,19 +1033,40 @@ func connectToPeer(h host.Host, targetAddr string, privKey *rsa.PrivateKey, pubK
 	// 先发送自己的公钥
 	encoder := gob.NewEncoder(stream)
 	if err := encoder.Encode(pubKey); err != nil {
-		log.Fatal("发送公钥失败:", err)
+		log.Printf("❌ 发送公钥失败: %v\n", err)
+		if ui != nil {
+			ui.AddMessage("系统", fmt.Sprintf("❌ 发送公钥失败: %v", err), true)
+		}
+		return
 	}
 
 	// 发送自己的用户名
 	if err := encoder.Encode(myUsername); err != nil {
-		log.Fatal("发送用户名失败:", err)
+		log.Printf("❌ 发送用户名失败: %v\n", err)
+		if ui != nil {
+			ui.AddMessage("系统", fmt.Sprintf("❌ 发送用户名失败: %v", err), true)
+		}
+		return
 	}
 
 	// 然后接收对方的公钥
 	decoder := gob.NewDecoder(stream)
 	var remotePubKey rsa.PublicKey
 	if err := decoder.Decode(&remotePubKey); err != nil {
-		log.Fatal("接收公钥失败:", err)
+		log.Printf("❌ 接收公钥失败: %v\n", err)
+		if ui != nil {
+			ui.AddMessage("系统", fmt.Sprintf("❌ 接收公钥失败: %v", err), true)
+		}
+		return
+	}
+	
+	// 验证接收到的公钥
+	if remotePubKey.N == nil {
+		log.Printf("❌ 接收到的公钥无效 (N 为 nil)\n")
+		if ui != nil {
+			ui.AddMessage("系统", "❌ 接收到的公钥无效", true)
+		}
+		return
 	}
 
 	// 接收对方的用户名
@@ -1928,7 +2036,27 @@ func getUserNameByPeerID(peerID peer.ID) string {
 // 该函数包含完整的错误处理和文件完整性验证
 // 如果文件哈希不匹配或签名验证失败，文件将被拒绝
 func handleFileTransfer(s network.Stream, privKey *rsa.PrivateKey) {
-	defer s.Close()
+	// Panic 恢复
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("❌ handleFileTransfer panic 恢复: %v\n", r)
+		}
+		s.Close()
+	}()
+
+	// 输入验证
+	if s == nil {
+		log.Printf("❌ stream 不能为 nil\n")
+		return
+	}
+	if privKey == nil {
+		log.Printf("❌ 私钥不能为 nil\n")
+		return
+	}
+	if s.Conn() == nil {
+		log.Printf("❌ stream 连接不能为 nil\n")
+		return
+	}
 
 	peerID := s.Conn().RemotePeer()
 	senderName := getUserNameByPeerID(peerID)
@@ -1987,15 +2115,48 @@ func handleFileTransfer(s network.Stream, privKey *rsa.PrivateKey) {
 	fmt.Printf("   文件大小: %.2f MB\n", float64(header.FileSize)/(1024*1024))
 	fmt.Printf("   分块数量: %d\n", header.ChunkCount)
 
+	// 验证文件大小
+	if header.FileSize <= 0 {
+		fmt.Printf("❌ 文件大小无效: %d\n", header.FileSize)
+		return
+	}
+	if header.FileSize > MaxFileSize {
+		fmt.Printf("❌ 文件太大: %d 字节，最大支持 %d 字节\n", header.FileSize, MaxFileSize)
+		return
+	}
+	if header.ChunkCount <= 0 {
+		fmt.Printf("❌ 分块数量无效: %d\n", header.ChunkCount)
+		return
+	}
+	if header.ChunkCount > 10000 { // 防止恶意分块
+		fmt.Printf("❌ 分块数量过多: %d，最大支持 10000\n", header.ChunkCount)
+		return
+	}
+
 	// 2. 接收文件分块
 	fileData := make([]byte, 0, header.FileSize)
 	receivedChunks := make(map[int][]byte)
 
 	for i := 0; i < header.ChunkCount; i++ {
+		// 更新读取超时
+		s.SetReadDeadline(time.Now().Add(30 * time.Second))
+		
 		var chunk FileChunk
 		if err := decoder.Decode(&chunk); err != nil {
-			fmt.Printf("❌ 接收分块失败: %v\n", err)
+			fmt.Printf("❌ 接收分块 %d 失败: %v\n", i, err)
 			return
+		}
+		
+		// 验证分块索引
+		if chunk.ChunkIndex < 0 || chunk.ChunkIndex >= header.ChunkCount {
+			fmt.Printf("❌ 分块索引无效: %d，应在 0 到 %d 之间\n", chunk.ChunkIndex, header.ChunkCount-1)
+			return
+		}
+		
+		// 检查是否重复接收
+		if _, exists := receivedChunks[chunk.ChunkIndex]; exists {
+			fmt.Printf("⚠️  分块 %d 已接收，跳过\n", chunk.ChunkIndex)
+			continue
 		}
 
 		// 解密分块（chunk.Data 是字节数组，不是 base64 字符串）
@@ -2042,9 +2203,29 @@ func handleFileTransfer(s network.Stream, privKey *rsa.PrivateKey) {
 		return
 	}
 
+	// 清理文件名，防止路径遍历攻击
+	cleanFileName := filepath.Base(header.FileName)
+	// 移除危险字符
+	cleanFileName = strings.ReplaceAll(cleanFileName, "..", "")
+	cleanFileName = strings.ReplaceAll(cleanFileName, "/", "_")
+	cleanFileName = strings.ReplaceAll(cleanFileName, "\\", "_")
+	
+	// 限制文件名长度
+	if len(cleanFileName) > 255 {
+		ext := filepath.Ext(cleanFileName)
+		name := cleanFileName[:255-len(ext)]
+		cleanFileName = name + ext
+	}
+
 	// 生成唯一文件名（避免覆盖）
 	timestamp := time.Now().Format("20060102_150405")
-	savePath := fmt.Sprintf("%s/%s_%s", receiveDir, timestamp, header.FileName)
+	savePath := filepath.Join(receiveDir, fmt.Sprintf("%s_%s", timestamp, cleanFileName))
+	
+	// 验证保存路径（防止路径遍历）
+	if !strings.HasPrefix(savePath, receiveDir) {
+		fmt.Printf("❌ 文件保存路径不安全\n")
+		return
+	}
 
 	if err := os.WriteFile(savePath, fileData, 0644); err != nil {
 		fmt.Printf("❌ 保存文件失败: %v\n", err)

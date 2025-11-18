@@ -57,10 +57,35 @@ clean:
 	rm -rf $(BIN_DIR)
 	rm -f coverage.txt
 
-# 运行所有测试
+# 运行所有测试（不包括集成测试，默认行为）
 test:
-	@echo "Running tests..."
-	$(GOTEST) -v ./...
+	@echo "Running unit tests (excluding integration tests)..."
+	$(GOTEST) -v -tags="!integration" -timeout=60s ./...
+
+# 运行单元测试（快速测试，不包括集成测试和压力测试）
+test-unit:
+	@echo "Running unit tests only..."
+	$(GOTEST) -v -tags="!integration" -timeout=60s ./...
+
+# 运行集成测试（包括 RPS 游戏测试、端到端测试等）
+test-integration:
+	@echo "Running integration tests..."
+	$(GOTEST) -v -tags=integration -timeout=5m ./...
+
+# 运行所有测试（包括集成测试）
+test-all:
+	@echo "Running all tests (including integration tests)..."
+	@echo "Step 1: Running unit tests..."
+	@$(GOTEST) -v -tags="!integration" -timeout=60s ./...
+	@echo "Step 2: Running integration tests..."
+	@$(GOTEST) -v -tags=integration -timeout=5m ./...
+
+# 运行测试并生成覆盖率报告
+test-coverage:
+	@echo "Running tests with coverage..."
+	@$(GOTEST) -tags="!integration" -coverprofile=coverage_unit.out -timeout=60s ./...
+	@$(GOTEST) -tags=integration -coverprofile=coverage_integration.out -timeout=5m ./...
+	@echo "Coverage reports generated: coverage_unit.out, coverage_integration.out"
 
 # 运行DHT测试脚本
 test-dht:
@@ -84,6 +109,18 @@ help:
 	@echo "  test-dht     - Run DHT test script"
 	@echo "  install      - Install dependencies"
 	@echo "  help         - Show this help message"
+	@echo ""
+	@echo "Testing targets:"
+	@echo "  cover        - Generate coverage report"
+	@echo "  cover-check  - Check coverage thresholds"
+	@echo "  cover-summary - Show coverage summary"
+	@echo ""
+	@echo "Code quality:"
+	@echo "  fmt          - Format code"
+	@echo "  vet          - Check code errors"
+	@echo "  lint         - Run static analysis"
+	@echo "  tidy         - Tidy go.mod"
+	@echo "  verify       - Verify dependencies"
 	@echo ""
 	@echo "Binary targets:"
 	@echo "  $(PCHAT_BINARY)     - Build pchat client"
@@ -117,9 +154,32 @@ vet:
 # 生成代码覆盖率报告
 cover:
 	@echo "Generating coverage report..."
-	$(GOTEST) -coverprofile=coverage.txt ./...
-	$(GO) tool cover -html=coverage.txt -o coverage.html
+	$(GOTEST) -coverprofile=coverage.out ./...
+	$(GO) tool cover -html=coverage.out -o coverage.html
+	$(GO) tool cover -func=coverage.out > coverage.txt
 	@echo "Coverage report generated: coverage.html"
+	@echo "Coverage summary: coverage.txt"
+
+# 检查覆盖率阈值
+cover-check:
+	@echo "Checking coverage thresholds..."
+	@./scripts/check_coverage.sh
+
+# 显示覆盖率摘要
+cover-summary:
+	@echo "Coverage Summary:"
+	@echo "=================="
+	@if [ -f coverage.out ]; then \
+		$(GO) tool cover -func=coverage.out | grep -E "^cmd/pchat|^internal/discovery|^cmd/registry|^internal/crypto|^internal/registry|^total:"; \
+	else \
+		echo "Coverage file not found. Run 'make cover' first."; \
+	fi
+
+# 运行覆盖率监控
+cover-monitor:
+	@echo "Running coverage monitor..."
+	@chmod +x scripts/coverage_monitor.sh
+	@./scripts/coverage_monitor.sh
 
 # 静态分析
 lint:
