@@ -32,16 +32,24 @@
 - ✅ **测试超时问题已解决** - 使用 build tags 分离长时间运行的测试（9个测试文件已标记为集成测试）
 - ✅ CLI工具函数和清理函数测试（27+ 个测试用例）- 最新新增
 - ✅ playRockPaperScissors 和 hangup 扩展测试（10+ 个测试函数）- 最新新增
-- ✅ formatDuration、queryUser 扩展测试、RPS 结果显示测试（15+ 个测试函数）- 最新新增
+- ✅ formatDuration、queryUser 扩展测试、RPS 结果显示测试（15+ 个测试函数）
+- ✅ **测试超时问题解决** - TestDisplaySystemNotification 已标记为集成测试
+- ✅ internal/discovery 扩展测试（7个测试用例）
+- ✅ cmd/pchat CLI 命令扩展测试（8个测试用例）
 
 **新增测试文件**:
 - `cmd/pchat/core_network_test.go` (604 行)
 - `cmd/pchat/ui_core_test.go` (426 行)
 - `cmd/pchat/dht_discovery_core_test.go` (377 行)
 - `cmd/pchat/helper_functions_test.go` (431 行)
-- `cmd/pchat/rps_game_test.go` (9.6K) - 最新新增
-- `cmd/pchat/connection_management_test.go` (4.6K) - 最新新增
-- `cmd/pchat/file_transfer_extended_test.go` (8.2K) - 最新新增
+- `cmd/pchat/rps_game_test.go` (9.6K)
+- `cmd/pchat/connection_management_test.go` (4.6K)
+- `cmd/pchat/file_transfer_extended_test.go` (8.2K)
+- `cmd/pchat/format_duration_test.go` - formatDuration 函数测试
+- `cmd/pchat/query_user_extended_test.go` - queryUser 扩展测试
+- `cmd/pchat/rps_display_test.go` - RPS 结果显示测试
+- `cmd/pchat/cli_commands_test.go` - CLI 命令扩展测试
+- `internal/discovery/dht_coverage_test.go` - DHT Discovery 扩展测试
 - `cmd/pchat/test_helpers.go` (测试辅助函数库)
 - `cmd/pchat/test_mocks.go` (Mock 对象库)
 - `cmd/pchat/table_driven_tests.go` (表驱动测试示例)

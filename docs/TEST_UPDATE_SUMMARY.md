@@ -448,6 +448,9 @@
 7. ✅ **测试优化完成** - 创建了测试清理优化辅助函数，优化了现有测试，添加了 42+ 个不需要网络连接的简单函数测试
 8. ✅ **测试超时问题已解决** - 使用 build tags 分离长时间运行的测试，9个测试文件已标记为集成测试
 9. ✅ **继续提高覆盖率** - 新增 formatDuration、queryUser 扩展测试、RPS 结果显示测试（15+ 个测试函数）
+10. ✅ **测试超时问题解决** - TestDisplaySystemNotification 已标记为集成测试，单元测试不再超时
+11. ✅ **internal/discovery 扩展测试** - 新增 GetUserByPeerID、ListUsers、RecordUserFromConnection 扩展测试（7个测试用例）
+12. ✅ **cmd/pchat CLI 命令扩展测试** - 新增 showHelp、handleCLICommand 扩展测试（8个测试用例）
 
 这些改进为项目的代码质量和可靠性提供了坚实的基础，为后续开发工作提供了保障。
 
